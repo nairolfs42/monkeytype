@@ -41,6 +41,8 @@
     <h1 class="text">
       <div class="top">monkey see</div>
       monkeytype
+
+      <!-- <div class="bottom">5 year anniversary!</div> -->
     </h1>
   </a>
   <nav>
@@ -114,7 +116,7 @@
       <div class="icon">
         <i class="fas fa-fw fa-bell"></i>
       </div>
-      <div class="notificationBubble hidden">5</div>
+      <div class="notificationBubble hidden"></div>
     </button>
     <a
       class="textButton view-login"
@@ -131,13 +133,11 @@
         onclick="this.blur();"
         router-link
       >
-        <div class="loading hidden">
+        <div class="spinner">
           <i class="fas fa-fw fa-spin fa-circle-notch"></i>
         </div>
-        <div class="user">
-          <i class="fas fa-fw fa-user"></i>
-        </div>
-        <div class="avatar hidden"></div>
+        <div class="avatar"></div>
+        <div class="notificationBubble hidden"></div>
         <div class="text"></div>
         <div class="levelAndBar">
           <div class="level" data-balloon-pos="up">1</div>
@@ -157,6 +157,16 @@
           <a href="/account" class="button" onclick="this.blur();" router-link>
             <i class="fas fa-fw fa-chart-line"></i>
             User stats
+          </a>
+          <a
+            href="/friends"
+            class="button goToFriends"
+            onclick="this.blur();"
+            router-link
+          >
+            <i class="fas fa-fw fa-user-friends"></i>
+            Friends
+            <span class="notificationBubble hidden">99</span>
           </a>
           <a
             href="/404"

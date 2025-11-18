@@ -1,4 +1,3 @@
-import _ from "lodash";
 import MonkeyError from "../utils/error";
 import type { Response, NextFunction } from "express";
 import { DBUser, getPartialUser } from "../dal/user";
@@ -8,7 +7,7 @@ import {
   EndpointMetadata,
   RequestAuthenticationOptions,
   PermissionId,
-} from "@monkeytype/contracts/schemas/api";
+} from "@monkeytype/contracts/util/api";
 import { isDevEnvironment } from "../utils/misc";
 import { getMetadata } from "./utility";
 import { TsRestRequestWithContext } from "../api/types";
@@ -59,7 +58,7 @@ const permissionChecks: Record<PermissionId, PermissionCheck> = {
     ["quoteMod"],
     (user) =>
       user.quoteMod === true ||
-      (typeof user.quoteMod === "string" && user.quoteMod !== "")
+      (typeof user.quoteMod === "string" && (user.quoteMod as string) !== "")
   ),
   canReport: buildUserPermission(
     ["canReport"],

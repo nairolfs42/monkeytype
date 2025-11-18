@@ -1,13 +1,12 @@
 import Config from "../../config";
 import {
-  FunboxName,
-  stringToFunboxNames,
   FunboxMetadata,
   getFunboxObject,
   FunboxProperty,
 } from "@monkeytype/funbox";
 
 import { FunboxFunctions, getFunboxFunctions } from "./funbox-functions";
+import { FunboxName } from "@monkeytype/schemas/configs";
 
 type FunboxMetadataWithFunctions = FunboxMetadata & {
   functions?: FunboxFunctions;
@@ -45,18 +44,12 @@ export function getAllFunboxes(): FunboxMetadataWithFunctions[] {
   return Object.values(metadataWithFunctions);
 }
 
-export function getFromString(
-  hashSeparatedFunboxes: string
-): FunboxMetadataWithFunctions[] {
-  return get(stringToFunboxNames(hashSeparatedFunboxes));
-}
-
 export function getActiveFunboxes(): FunboxMetadataWithFunctions[] {
-  return get(stringToFunboxNames(Config.funbox));
+  return get(getActiveFunboxNames());
 }
 
 export function getActiveFunboxNames(): FunboxName[] {
-  return stringToFunboxNames(Config.funbox);
+  return Config.funbox ?? [];
 }
 
 /**
@@ -94,6 +87,15 @@ export function findSingleActiveFunboxWithProperty(
  */
 export function isFunboxActiveWithProperty(property: FunboxProperty): boolean {
   return getActiveFunboxesWithProperty(property).length > 0;
+}
+
+/**
+ * Check if the given funbox is active
+ * @param funbox funbox name
+ * @returns true if the funbox is active, false otherwise
+ */
+export function isFunboxActive(funbox: FunboxName): boolean {
+  return getActiveFunboxNames().includes(funbox);
 }
 
 type MandatoryFunboxFunction<F extends keyof FunboxFunctions> = Exclude<

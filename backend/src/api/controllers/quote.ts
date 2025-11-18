@@ -1,4 +1,3 @@
-import _ from "lodash";
 import { v4 as uuidv4 } from "uuid";
 import { getPartialUser, updateQuoteRatings } from "../../dal/user";
 import * as ReportDAL from "../../dal/report";
@@ -23,6 +22,7 @@ import {
 } from "@monkeytype/contracts/quotes";
 import { replaceObjectId, replaceObjectIds } from "../../utils/misc";
 import { MonkeyRequest } from "../types";
+import { Language } from "@monkeytype/schemas/languages";
 
 async function verifyCaptcha(captcha: string): Promise<void> {
   if (!(await verify(captcha))) {
@@ -36,9 +36,9 @@ export async function getQuotes(
   const { uid } = req.ctx.decodedToken;
   const quoteMod = (await getPartialUser(uid, "get quotes", ["quoteMod"]))
     .quoteMod;
-  const quoteModString = quoteMod === true ? "all" : (quoteMod as string);
+  const quoteModLanguage = quoteMod === true ? "all" : (quoteMod as Language);
 
-  const data = await NewQuotesDAL.get(quoteModString);
+  const data = await NewQuotesDAL.get(quoteModLanguage);
   return new MonkeyResponse(
     "Quote submissions retrieved",
     replaceObjectIds(data)
@@ -125,7 +125,10 @@ export async function submitRating(
     shouldUpdateRating
   );
 
-  _.setWith(userQuoteRatings, `[${language}][${quoteId}]`, rating, Object);
+  if (!userQuoteRatings[language]) {
+    userQuoteRatings[language] = {};
+  }
+  userQuoteRatings[language][quoteId] = rating;
 
   await updateQuoteRatings(uid, userQuoteRatings);
 

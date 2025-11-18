@@ -9,8 +9,11 @@ import * as ConnectionState from "../states/connection";
 import { escapeHTML } from "../utils/misc";
 import AnimatedModal from "../utils/animated-modal";
 import { updateXp as accountPageUpdateProfile } from "./profile";
-import { MonkeyMail } from "@monkeytype/contracts/schemas/users";
+import { MonkeyMail } from "@monkeytype/schemas/users";
 import * as XPBar from "../elements/xp-bar";
+import * as AuthEvent from "../observables/auth-event";
+import * as ActivePage from "../states/active-page";
+import { animate } from "animejs";
 
 let accountAlerts: MonkeyMail[] = [];
 let maxMail = 0;
@@ -29,6 +32,7 @@ const state: State = {
 
 function hide(): void {
   setNotificationBubbleVisible(false);
+  DB.updateInboxUnreadSize(0);
   void modal.hide({
     afterAnimation: async () => {
       $("#alertsPopup .notificationHistory .list").empty();
@@ -92,7 +96,12 @@ function hide(): void {
       if (totalXpClaimed > 0) {
         const snapxp = DB.getSnapshot()?.xp ?? 0;
         void XPBar.update(snapxp, totalXpClaimed);
-        accountPageUpdateProfile(snapxp + totalXpClaimed);
+
+        const activePage = ActivePage.get();
+        if (activePage === "account" || activePage === "profile") {
+          accountPageUpdateProfile(activePage, snapxp + totalXpClaimed, true);
+        }
+
         DB.addXp(totalXpClaimed);
       }
     },
@@ -301,8 +310,9 @@ export function setNotificationBubbleVisible(tf: boolean): void {
 }
 
 function updateInboxSize(): void {
+  const remainingItems = accountAlerts.length - mailToDelete.length;
   $("#alertsPopup .accountAlerts .title .right").text(
-    `${accountAlerts.length}/${maxMail}`
+    `${remainingItems}/${maxMail}`
   );
 }
 
@@ -332,18 +342,16 @@ function markReadAlert(id: string): void {
     .append(
       `<button class="deleteAlert textButton" aria-label="Delete" data-balloon-pos="left"><i class="fas fa-trash"></i></button>`
     );
-  item.find(".rewards").animate(
-    {
-      opacity: 0,
-      height: 0,
-      marginTop: 0,
-    },
-    250,
-    "easeOutCubic",
-    () => {
+
+  animate(item.find(".rewards")[0] as HTMLElement, {
+    opacity: 0,
+    height: 0,
+    marginTop: 0,
+    duration: 250,
+    onComplete: () => {
       item.find(".rewards").remove();
-    }
-  );
+    },
+  });
 }
 
 function updateClaimDeleteAllButton(): void {
@@ -386,29 +394,31 @@ NotificationEvent.subscribe((message, level, customTitle) => {
   }
 });
 
+AuthEvent.subscribe((event) => {
+  if (event.type === "snapshotUpdated" && event.data.isInitial) {
+    const snapshot = DB.getSnapshot();
+    setNotificationBubbleVisible((snapshot?.inboxUnreadSize ?? 0) > 0);
+  }
+  if (event.type === "authStateChanged" && !event.data.isUserSignedIn) {
+    setNotificationBubbleVisible(false);
+    accountAlerts = [];
+    mailToMarkRead = [];
+    mailToDelete = [];
+    $("#alertsPopup .accountAlerts .list").empty();
+  }
+});
+
 const modal = new AnimatedModal({
   dialogId: "alertsPopup",
   customAnimations: {
     show: {
       modal: {
-        from: {
-          marginRight: "-10rem",
-        },
-        to: {
-          marginRight: "0",
-        },
-        easing: "easeOutCirc",
+        marginRight: ["-10rem", "0"],
       },
     },
     hide: {
       modal: {
-        from: {
-          marginRight: "0",
-        },
-        to: {
-          marginRight: "-10rem",
-        },
-        easing: "easeInCirc",
+        marginRight: ["0", "-10rem"],
       },
     },
   },

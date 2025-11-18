@@ -1,20 +1,22 @@
-import Page from "./page";
+import { PageWithUrlParams } from "./page";
 import * as Skeleton from "../utils/skeleton";
 import Config from "../config";
 import {
   LeaderboardEntry,
   XpLeaderboardEntry,
-} from "@monkeytype/contracts/schemas/leaderboards";
+} from "@monkeytype/schemas/leaderboards";
 import { capitalizeFirstLetter } from "../utils/strings";
 import Ape from "../ape";
 import * as Notifications from "../elements/notifications";
 import Format from "../utils/format";
-import { Auth, isAuthenticated } from "../firebase";
+import { getAuthenticatedUser, isAuthenticated } from "../firebase";
 import * as DB from "../db";
 import {
   endOfDay,
   endOfWeek,
   format,
+  formatDuration,
+  intervalToDuration,
   startOfDay,
   startOfWeek,
   subDays,
@@ -25,23 +27,23 @@ import { differenceInSeconds } from "date-fns/differenceInSeconds";
 import * as DateTime from "../utils/date-and-time";
 import { getHtmlByUserFlags } from "../controllers/user-flag-controller";
 import { getHTMLById as getBadgeHTMLbyId } from "../controllers/badge-controller";
-import {
-  applyReducedMotion,
-  getDiscordAvatarUrl,
-  isDevEnvironment,
-} from "../utils/misc";
+import { isDevEnvironment } from "../utils/misc";
 import { abbreviateNumber } from "../utils/numbers";
 import { formatDistanceToNow } from "date-fns/formatDistanceToNow";
 import { z } from "zod";
 import { LocalStorageWithSchema } from "../utils/local-storage-with-schema";
-import {
-  safeParse as parseUrlSearchParams,
-  serialize as serializeUrlSearchParams,
-} from "zod-urlsearchparams";
 import { UTCDateMini } from "@date-fns/utc";
 import * as ConfigEvent from "../observables/config-event";
 import * as ActivePage from "../states/active-page";
-import { PaginationQuery } from "@monkeytype/contracts/leaderboards";
+import {
+  PaginationQuery,
+  FriendsOnlyQuery,
+} from "@monkeytype/contracts/leaderboards";
+import { Language, LanguageSchema } from "@monkeytype/schemas/languages";
+import { isSafeNumber } from "@monkeytype/util/numbers";
+import { Mode, Mode2, ModeSchema } from "@monkeytype/schemas/shared";
+import * as ServerConfiguration from "../ape/server-configuration";
+import { getAvatarElement } from "../utils/discord-avatar";
 
 const LeaderboardTypeSchema = z.enum(["allTime", "weekly", "daily"]);
 type LeaderboardType = z.infer<typeof LeaderboardTypeSchema>;
@@ -52,6 +54,7 @@ type AllTimeState = {
   type: "allTime";
   mode: "time";
   mode2: "15" | "60";
+  language: "english";
   data: LeaderboardEntry[] | null;
   count: number;
   userData: LeaderboardEntry | null;
@@ -67,11 +70,11 @@ type WeeklyState = {
 
 type DailyState = {
   type: "daily";
-  mode: "time";
-  mode2: "15" | "60";
+  mode: Mode;
+  mode2: Mode2<DailyState["mode"]>;
   yesterday: boolean;
   minWpm: number;
-  language: string;
+  language: Language;
   data: LeaderboardEntry[] | null;
   count: number;
   userData: LeaderboardEntry | null;
@@ -83,9 +86,9 @@ type State = {
   updating: boolean;
   page: number;
   pageSize: number;
+  friendsOnly: boolean;
   title: string;
   error?: string;
-  discordAvatarUrls: Map<string, string>;
   scrollToUserAfterFill: boolean;
   goToUserPage: boolean;
 } & (AllTimeState | WeeklyState | DailyState);
@@ -94,23 +97,26 @@ const state = {
   loading: true,
   updating: false,
   type: "allTime",
+  mode: "time",
   mode2: "15",
   data: null,
   userData: null,
   page: 0,
   pageSize: 50,
+  friendsOnly: false,
   title: "All-time English Time 15 Leaderboard",
-  discordAvatarUrls: new Map<string, string>(),
   scrollToUserAfterFill: false,
   goToUserPage: false,
 } as State;
 
 const SelectorSchema = z.object({
   type: LeaderboardTypeSchema,
-  mode2: z.enum(["15", "60"]).optional(),
-  language: z.string().optional(),
+  mode: ModeSchema.optional(),
+  mode2: z.string().optional(),
+  language: LanguageSchema.optional(),
   yesterday: z.boolean().optional(),
   lastWeek: z.boolean().optional(),
+  friendsOnly: z.boolean().optional(),
 });
 const UrlParameterSchema = SelectorSchema.extend({
   page: z.number(),
@@ -124,6 +130,25 @@ const selectorLS = new LocalStorageWithSchema({
   fallback: { type: "allTime", mode2: "15" },
 });
 
+type LanguagesByModeByMode2 = Partial<
+  Record<Mode, Record<string /*mode2*/, Language[]>>
+>;
+
+type ValidLeaderboards = {
+  allTime: LanguagesByModeByMode2;
+  daily: LanguagesByModeByMode2;
+};
+
+const validLeaderboards: ValidLeaderboards = {
+  allTime: {
+    time: {
+      "15": ["english"],
+      "60": ["english"],
+    },
+  },
+  daily: {},
+};
+
 function updateTitle(): void {
   const type =
     state.type === "allTime"
@@ -132,21 +157,17 @@ function updateTitle(): void {
       ? "Weekly XP"
       : "Daily";
 
+  const friend = state.friendsOnly ? "Friends " : "";
+
   const language =
-    state.type === "daily"
-      ? capitalizeFirstLetter(state.language)
-      : state.type === "allTime"
-      ? "English"
-      : "";
+    state.type !== "weekly" ? capitalizeFirstLetter(state.language) : "";
 
   const mode =
-    state.type === "allTime"
-      ? ` Time ${state.mode2}`
-      : state.type === "daily"
-      ? ` Time ${state.mode2}`
+    state.type !== "weekly"
+      ? ` ${capitalizeFirstLetter(state.mode)} ${state.mode2}`
       : "";
 
-  state.title = `${type} ${language} ${mode} Leaderboard`;
+  state.title = `${type} ${language} ${mode} ${friend}Leaderboard`;
   $(".page.pageLeaderboards .bigtitle >.text").text(state.title);
 
   $(".page.pageLeaderboards .bigtitle .subtext").addClass("hidden");
@@ -242,17 +263,30 @@ async function requestData(update = false): Promise<void> {
   updateContent();
 
   const defineRequests = <TQuery, TRank, TData>(
-    data: (args: { query: TQuery & PaginationQuery }) => Promise<TData>,
+    data: (args: {
+      query: TQuery & PaginationQuery & FriendsOnlyQuery;
+    }) => Promise<TData>,
     rank: (args: { query: TQuery }) => Promise<TRank>,
     baseQuery: TQuery
   ): {
     rank: undefined | (() => Promise<TRank>);
     data: () => Promise<TData>;
   } => ({
-    rank: async () => rank({ query: baseQuery }),
+    rank: async () =>
+      rank({
+        query: {
+          ...baseQuery,
+          friendsOnly: state.friendsOnly || undefined,
+        },
+      }),
     data: async () =>
       data({
-        query: { ...baseQuery, page: state.page, pageSize: state.pageSize },
+        query: {
+          ...baseQuery,
+          page: state.page,
+          pageSize: state.pageSize,
+          friendsOnly: state.friendsOnly || undefined,
+        },
       }),
   });
 
@@ -269,7 +303,7 @@ async function requestData(update = false): Promise<void> {
       Ape.leaderboards.getDailyRank,
       {
         language: state.language,
-        mode: "time",
+        mode: state.mode,
         mode2: state.mode2,
         daysBefore: state.yesterday ? 1 : undefined,
       }
@@ -322,11 +356,16 @@ async function requestData(update = false): Promise<void> {
     }
   } else {
     state.data = null;
-    state.error = "Something went wrong";
-    Notifications.add(
-      "Failed to get leaderboard: " + dataResponse.body.message,
-      -1
-    );
+
+    if (dataResponse.status === 404) {
+      state.error = "No leaderboard found";
+    } else {
+      state.error = "Something went wrong";
+      Notifications.add(
+        "Failed to get leaderboard: " + dataResponse.body.message,
+        -1
+      );
+    }
   }
 
   if (state.userData === null && rankResponse !== undefined) {
@@ -339,19 +378,6 @@ async function requestData(update = false): Promise<void> {
       state.error = "Something went wrong";
       Notifications.add("Failed to get rank: " + rankResponse.body.message, -1);
     }
-  }
-
-  if (state.data !== null) {
-    const entriesMissingAvatars = state.data.filter(
-      (entry) => !state.discordAvatarUrls.has(entry.uid)
-    );
-    void getAvatarUrls(entriesMissingAvatars).then((urlMap) => {
-      state.discordAvatarUrls = new Map([
-        ...state.discordAvatarUrls,
-        ...urlMap,
-      ]);
-      fillAvatars();
-    });
   }
 
   state.loading = false;
@@ -404,57 +430,7 @@ function updateJumpButtons(): void {
   }
 }
 
-async function getAvatarUrls(
-  data: {
-    uid: string;
-    discordId?: string | undefined;
-    discordAvatar?: string | undefined;
-  }[]
-): Promise<Map<string, string>> {
-  const results = await Promise.allSettled(
-    data.map(async (entry) => ({
-      uid: entry.uid,
-      url: await getDiscordAvatarUrl(entry.discordId, entry.discordAvatar),
-    }))
-  );
-
-  const avatarMap = new Map<string, string>();
-  results.forEach((result) => {
-    if (result.status === "fulfilled" && result.value.url !== null) {
-      avatarMap.set(result.value.uid, result.value.url);
-    }
-  });
-
-  return avatarMap;
-}
-function fillAvatars(): void {
-  const elements = $(".page.pageLeaderboards table .lbav");
-
-  for (const element of elements) {
-    const uid = $(element).siblings(".entryName").attr("uid") as string;
-    const url = state.discordAvatarUrls.get(uid);
-
-    if (url !== undefined) {
-      $(element).html(
-        `<div class="avatar" style="background-image:url(${url})"></div>`
-      );
-    } else {
-      $(element).html(
-        `<div class="avatarPlaceholder"><i class="fas fa-user-circle"></i></div>`
-      );
-    }
-  }
-}
-
-function buildTableRow(entry: LeaderboardEntry, me = false): string {
-  let avatar = `<div class="avatarPlaceholder"><i class="fas fa-user-circle"></i></div>`;
-
-  if (entry.discordAvatar !== undefined) {
-    avatar = `<div class="avatarPlaceholder"><i class="fas fa-circle-notch fa-spin"></i></div>`;
-  }
-
-  const meClass = me ? "me" : "";
-
+function buildTableRow(entry: LeaderboardEntry, me = false): HTMLElement {
   const formatted = {
     wpm: Format.typingSpeed(entry.wpm, { showDecimalPlaces: true }),
     acc: Format.percentage(entry.acc, { showDecimalPlaces: true }),
@@ -462,20 +438,28 @@ function buildTableRow(entry: LeaderboardEntry, me = false): string {
     con: Format.percentage(entry.consistency, { showDecimalPlaces: true }),
   };
 
-  return `
-    <tr class="${meClass}" data-uid="${entry.uid}">
-      <td>${
-        entry.rank === 1 ? '<i class="fas fa-fw fa-crown"></i>' : entry.rank
-      }</td>
+  const element = document.createElement("tr");
+  if (me) {
+    element.classList.add("me");
+  }
+  element.dataset["uid"] = entry.uid;
+  element.innerHTML = `
+      <td>${formatRank(entry.friendsRank)}</td>
+      <td>${formatRank(entry.rank)}</td>
       <td>
         <div class="avatarNameBadge">
-          <div class="lbav">${avatar}</div>
+          <div class="avatarPlaceholder"></div>
           <a href="${location.origin}/profile/${
     entry.uid
   }?isUid" class="entryName" uid=${entry.uid} router-link>${entry.name}</a>
           <div class="flagsAndBadge">
-            ${getHtmlByUserFlags(entry)}
-            ${entry.badgeId ? getBadgeHTMLbyId(entry.badgeId) : ""}
+            ${getHtmlByUserFlags({
+              ...entry,
+              isFriend: DB.isFriend(entry.uid),
+            })}
+            ${
+              isSafeNumber(entry.badgeId) ? getBadgeHTMLbyId(entry.badgeId) : ""
+            }
           </div>
         </div>
       </td>
@@ -484,7 +468,7 @@ function buildTableRow(entry: LeaderboardEntry, me = false): string {
         <div class="sub">${formatted.acc}</div>
       </td>
       </td>
-      <td class="stat narrow">
+      <td class="stat narrow rawAndConsistency">
       ${formatted.raw}
         <div class="sub">${formatted.con}</div>
       </td>
@@ -496,37 +480,43 @@ function buildTableRow(entry: LeaderboardEntry, me = false): string {
         entry.timestamp,
         "dd MMM yyyy"
       )}<div class="sub">${format(entry.timestamp, "HH:mm")}</div></td>
-    </tr>
+    
   `;
+  element
+    .querySelector(".avatarPlaceholder")
+    ?.replaceWith(getAvatarElement(entry));
+  return element;
 }
 
-function buildWeeklyTableRow(entry: XpLeaderboardEntry, me = false): string {
-  let avatar = `<div class="avatarPlaceholder"><i class="fas fa-user-circle"></i></div>`;
-
-  if (entry.discordAvatar !== undefined) {
-    avatar = `<div class="avatarPlaceholder"><i class="fas fa-circle-notch fa-spin"></i></div>`;
-  }
-
-  const meClass = me ? "me" : "";
-
+function buildWeeklyTableRow(
+  entry: XpLeaderboardEntry,
+  me = false
+): HTMLElement {
   const activeDiff = formatDistanceToNow(entry.lastActivityTimestamp, {
     addSuffix: true,
   });
-
-  return `
-    <tr class="${meClass}" data-uid="${entry.uid}">
-      <td>${
-        entry.rank === 1 ? '<i class="fas fa-fw fa-crown"></i>' : entry.rank
-      }</td>
+  const element = document.createElement("tr");
+  if (me) {
+    element.classList.add("me");
+  }
+  element.dataset["uid"] = entry.uid;
+  element.innerHTML = `
+      <td>${formatRank(entry.friendsRank)}</td>
+      <td>${formatRank(entry.rank)}</td>
       <td>
         <div class="avatarNameBadge">
-          <div class="lbav">${avatar}</div>
+          <div class="avatarPlaceholder"></div>
           <a href="${location.origin}/profile/${
     entry.uid
   }?isUid" class="entryName" uid=${entry.uid} router-link>${entry.name}</a>
           <div class="flagsAndBadge">
-            ${getHtmlByUserFlags(entry)}
-            ${entry.badgeId ? getBadgeHTMLbyId(entry.badgeId) : ""}
+            ${getHtmlByUserFlags({
+              ...entry,
+              isFriend: DB.isFriend(entry.uid),
+            })}
+            ${
+              isSafeNumber(entry.badgeId) ? getBadgeHTMLbyId(entry.badgeId) : ""
+            }
           </div>
         </div>
       </td>
@@ -556,11 +546,21 @@ function buildWeeklyTableRow(entry: XpLeaderboardEntry, me = false): string {
       </td>
     </tr>
   `;
+  element
+    .querySelector(".avatarPlaceholder")
+    ?.replaceWith(getAvatarElement(entry));
+  return element;
 }
 
 function fillTable(): void {
   const table = $(".page.pageLeaderboards table tbody");
   table.empty();
+
+  if (state.friendsOnly) {
+    table.parent().addClass("friendsOnly");
+  } else {
+    table.parent().removeClass("friendsOnly");
+  }
 
   $(".page.pageLeaderboards table thead").addClass("hidden");
   if (state.type === "allTime" || state.type === "daily") {
@@ -579,12 +579,12 @@ function fillTable(): void {
 
   if (state.type === "allTime" || state.type === "daily") {
     for (const entry of state.data) {
-      const me = Auth?.currentUser?.uid === entry.uid;
+      const me = getAuthenticatedUser()?.uid === entry.uid;
       table.append(buildTableRow(entry, me));
     }
   } else if (state.type === "weekly") {
     for (const entry of state.data) {
-      const me = Auth?.currentUser?.uid === entry.uid;
+      const me = getAuthenticatedUser()?.uid === entry.uid;
       table.append(buildWeeklyTableRow(entry, me));
     }
   }
@@ -624,13 +624,18 @@ function fillUser(): void {
     return;
   }
 
+  const minTimeTyping =
+    ServerConfiguration.get()?.leaderboards.minTimeTyping ?? 7200;
+
   if (
     isAuthenticated() &&
     !isDevEnvironment() &&
-    (DB.getSnapshot()?.typingStats?.timeTyping ?? 0) < 7200
+    (DB.getSnapshot()?.typingStats?.timeTyping ?? 0) < minTimeTyping
   ) {
     $(".page.pageLeaderboards .bigUser").html(
-      '<div class="warning">Your account must have 2 hours typed to be placed on the leaderboard.</div>'
+      `<div class="warning">Your account must have ${formatDuration(
+        intervalToDuration({ start: 0, end: minTimeTyping * 1000 })
+      )} typed to be placed on the leaderboard.</div>`
     );
     return;
   }
@@ -672,9 +677,13 @@ function fillUser(): void {
     }
 
     const userData = state.userData;
-    const percentile = (userData.rank / state.count) * 100;
+    const rank = state.friendsOnly
+      ? (userData.friendsRank as number)
+      : userData.rank;
+    const percentile = (rank / state.count) * 100;
+
     let percentileString = `Top ${percentile.toFixed(2)}%`;
-    if (userData.rank === 1) {
+    if (rank === 1) {
       percentileString = "GOAT";
     }
 
@@ -705,11 +714,7 @@ function fillUser(): void {
     };
 
     const html = `
-          <div class="rank">${
-            userData.rank === 1
-              ? '<i class="fas fa-fw fa-crown"></i>'
-              : userData.rank
-          }</div>
+          <div class="rank">${formatRank(rank)}</div>
         <div class="userInfo">
           <div class="top">You (${percentileString})</div>
           <div class="bottom">${diffText}</div>
@@ -743,7 +748,7 @@ function fillUser(): void {
           <div>${formatted.wpm}</div>
           <div class="sub">${formatted.acc}</div>
         </div>
-        <div class="stat narrow">
+        <div class="stat narrow rawAndConsistency">
           <div>${formatted.raw}</div>
           <div class="sub">${formatted.con}</div>
         </div>
@@ -761,9 +766,13 @@ function fillUser(): void {
     }
 
     const userData = state.userData;
-    const percentile = (userData.rank / state.count) * 100;
+    const rank = state.friendsOnly
+      ? (userData.friendsRank as number)
+      : userData.rank;
+    const percentile = (rank / state.count) * 100;
+
     let percentileString = `Top ${percentile.toFixed(2)}%`;
-    if (userData.rank === 1) {
+    if (rank === 1) {
       percentileString = "GOAT";
     }
 
@@ -800,11 +809,7 @@ function fillUser(): void {
     };
 
     const html = `
-          <div class="rank">${
-            userData.rank === 1
-              ? '<i class="fas fa-fw fa-crown"></i>'
-              : userData.rank
-          }</div>
+          <div class="rank">${formatRank(rank)}</div>
         <div class="userInfo">
           <div class="top">You (${percentileString})</div>
           <div class="bottom">${diffText}</div>
@@ -845,7 +850,7 @@ function fillUser(): void {
 
 function updateContent(): void {
   $(".page.pageLeaderboards .loading").addClass("hidden");
-  $(".page.pageLeaderboards .updating").addClass("hidden");
+  $(".page.pageLeaderboards .updating").addClass("invisible");
   $(".page.pageLeaderboards .error").addClass("hidden");
 
   if (state.error !== undefined) {
@@ -857,7 +862,7 @@ function updateContent(): void {
 
   if (state.updating) {
     disableButtons();
-    $(".page.pageLeaderboards .updating").removeClass("hidden");
+    $(".page.pageLeaderboards .updating").removeClass("invisible");
     return;
   } else if (state.loading) {
     disableButtons();
@@ -887,23 +892,24 @@ function updateContent(): void {
   fillTable();
 
   for (const element of document.querySelectorAll(
-    ".page.pageLeaderboards .speedUnit"
+    ".page.pageLeaderboards .wide.speedUnit, .page.pageLeaderboards .narrow.speedUnit span"
   )) {
     element.innerHTML = Config.typingSpeedUnit;
   }
 
   if (state.scrollToUserAfterFill) {
-    const windowHeight = $(window).height() ?? 0;
-    const offset = $(`.tableAndUser .me`).offset()?.top ?? 0;
-    const scrollTo = offset - windowHeight / 2;
-    $([document.documentElement, document.body]).animate(
-      {
-        scrollTop: scrollTo,
-      },
-      applyReducedMotion(500)
-    );
+    document.querySelector(".tableAndUser .me")?.scrollIntoView({
+      block: "center",
+    });
     state.scrollToUserAfterFill = false;
   }
+}
+
+function updateSideButtons(): void {
+  updateTypeButtons();
+  updateFriendsButtons();
+  updateModeButtons();
+  updateLanguageButtons();
 }
 
 function updateTypeButtons(): void {
@@ -912,28 +918,91 @@ function updateTypeButtons(): void {
   el.find(`button[data-type=${state.type}]`).addClass("active");
 }
 
-function updateSecondaryButtons(): void {
-  $(".page.pageLeaderboards .buttonGroup.secondary").addClass("hidden");
-  $(".page.pageLeaderboards .buttons .divider").addClass("hidden");
-  $(".page.pageLeaderboards .buttons .divider2").addClass("hidden");
-
-  if (state.type === "allTime") {
-    $(".page.pageLeaderboards .buttonGroup.modeButtons").removeClass("hidden");
-    $(".page.pageLeaderboards .buttons .divider").removeClass("hidden");
-    $(".page.pageLeaderboards .buttons .divider2").addClass("hidden");
-
-    updateModeButtons();
+function updateFriendsButtons(): void {
+  const friendsOnlyGroup = $(
+    ".page.pageLeaderboards .buttonGroup.friendsOnlyButtons"
+  );
+  if (
+    isAuthenticated() &&
+    (ServerConfiguration.get()?.connections.enabled ?? false)
+  ) {
+    friendsOnlyGroup.removeClass("hidden");
+  } else {
+    friendsOnlyGroup.addClass("hidden");
+    state.friendsOnly = false;
+    return;
   }
-  if (state.type === "daily") {
-    $(".page.pageLeaderboards .buttonGroup.modeButtons").removeClass("hidden");
-    $(".page.pageLeaderboards .buttonGroup.languageButtons").removeClass(
-      "hidden"
-    );
-    $(".page.pageLeaderboards .buttons .divider").removeClass("hidden");
-    $(".page.pageLeaderboards .buttons .divider2").removeClass("hidden");
 
-    updateModeButtons();
-    updateLanguageButtons();
+  const everyoneButton = $(
+    ".page.pageLeaderboards .buttonGroup.friendsOnlyButtons .everyone"
+  );
+  const friendsOnlyButton = $(
+    ".page.pageLeaderboards .buttonGroup.friendsOnlyButtons .friendsOnly"
+  );
+  if (state.friendsOnly) {
+    friendsOnlyButton.addClass("active");
+    everyoneButton.removeClass("active");
+  } else {
+    friendsOnlyButton.removeClass("active");
+    everyoneButton.addClass("active");
+  }
+}
+
+function updateModeButtons(): void {
+  if (state.type !== "allTime" && state.type !== "daily") {
+    $(".page.pageLeaderboards .buttonGroup.modeButtons").addClass("hidden");
+    return;
+  }
+  $(".page.pageLeaderboards .buttonGroup.modeButtons").removeClass("hidden");
+
+  const el = $(".page.pageLeaderboards .buttonGroup.modeButtons");
+  el.find("button").removeClass("active");
+  el.find(
+    `button[data-mode=${state.mode}][data-mode2=${state.mode2}]`
+  ).addClass("active");
+
+  //hide all mode buttons
+  $(`.page.pageLeaderboards .buttonGroup.modeButtons button`).addClass(
+    "hidden"
+  );
+
+  //show all valid ones
+  for (const mode of Object.keys(validLeaderboards[state.type]) as Mode[]) {
+    for (const mode2 of Object.keys(
+      // oxlint-disable-next-line no-non-null-assertion
+      validLeaderboards[state.type][mode]!
+    )) {
+      $(
+        `.page.pageLeaderboards .buttonGroup.modeButtons button[data-mode="${mode}"][data-mode2="${mode2}"]`
+      ).removeClass("hidden");
+    }
+  }
+}
+
+function updateLanguageButtons(): void {
+  if (state.type !== "daily") {
+    $(".page.pageLeaderboards .buttonGroup.languageButtons").addClass("hidden");
+    return;
+  }
+  $(".page.pageLeaderboards .buttonGroup.languageButtons").removeClass(
+    "hidden"
+  );
+
+  const el = $(".page.pageLeaderboards .buttonGroup.languageButtons");
+  el.find("button").removeClass("active");
+  el.find(`button[data-language=${state.language}]`).addClass("active");
+
+  //hide all languages
+  $(`.page.pageLeaderboards .buttonGroup.languageButtons button`).addClass(
+    "hidden"
+  );
+
+  //show all valid ones
+  for (const lang of validLeaderboards[state.type][state.mode]?.[state.mode2] ??
+    []) {
+    $(
+      `.page.pageLeaderboards .buttonGroup.languageButtons button[data-language="${lang}"]`
+    ).removeClass("hidden");
   }
 }
 
@@ -996,37 +1065,146 @@ function stopTimer(): void {
   $(".page.pageLeaderboards .titleAndButtons .timer").text("-");
 }
 
-// async function appendLanguageButtons(): Promise<void> {
-//   const languages =
-//     (await ServerConfiguration.get()?.dailyLeaderboards.validModeRules.map(
-//       (r) => r.language
-//     )) ?? [];
-
-//   const el = $(".page.pageLeaderboards .buttonGroup.languageButtons");
-//   el.empty();
-
-//   for (const language of languages) {
-//     el.append(`
-//       <button data-language="${language}">
-//         <i class="fas fa-globe"></i>
-//         ${language}
-//       </button>
-//     `);
-//   }
-// }
-
-function updateModeButtons(): void {
-  if (state.type !== "allTime" && state.type !== "daily") return;
-  const el = $(".page.pageLeaderboards .buttonGroup.modeButtons");
-  el.find("button").removeClass("active");
-  el.find(`button[data-mode=${state.mode2}]`).addClass("active");
+function convertRuleOption(rule: string): string[] {
+  if (rule.startsWith("(")) {
+    return rule.slice(1, -1).split("|");
+  }
+  return [rule];
 }
 
-function updateLanguageButtons(): void {
-  if (state.type !== "daily") return;
-  const el = $(".page.pageLeaderboards .buttonGroup.languageButtons");
-  el.find("button").removeClass("active");
-  el.find(`button[data-language=${state.language}]`).addClass("active");
+async function updateValidDailyLeaderboards(): Promise<void> {
+  const dailyRulesConfig =
+    ServerConfiguration.get()?.dailyLeaderboards.validModeRules;
+
+  if (dailyRulesConfig === undefined) {
+    throw new Error(
+      "cannot load server configuration for dailyLeaderboards.validModeRules"
+    );
+  }
+
+  //a rule can contain multiple values. create a flat list out of them
+  const dailyRules = dailyRulesConfig.flatMap((rule) => {
+    const languages = convertRuleOption(rule.language) as Language[];
+    const mode2List = convertRuleOption(rule.mode2);
+
+    return mode2List.map((mode2) => ({
+      mode: rule.mode as Mode,
+      mode2,
+      languages,
+    }));
+  });
+
+  validLeaderboards.daily = dailyRules.reduce<
+    Partial<Record<Mode, Record<string /*mode2*/, Language[]>>>
+  >((acc, { mode, mode2, languages }) => {
+    let modes = acc[mode];
+    if (modes === undefined) {
+      modes = {};
+      acc[mode] = modes;
+    }
+
+    let modes2 = modes[mode2];
+    if (modes2 === undefined) {
+      modes2 = [];
+      modes[mode2] = modes2;
+    }
+
+    modes2.push(...languages);
+    return acc;
+  }, {});
+}
+
+function checkIfLeaderboardIsValid(): void {
+  if (state.type === "weekly") return;
+
+  const validLeaderboard = validLeaderboards[state.type];
+
+  let validModes2 = validLeaderboard[state.mode];
+  if (validModes2 === undefined) {
+    const firstMode = Object.keys(validLeaderboard).sort()[0] as Mode;
+    if (firstMode === undefined) {
+      throw new Error(`no valid leaderboard config for type ${state.type}`);
+    }
+    state.mode = firstMode;
+    // oxlint-disable-next-line no-non-null-assertion
+    validModes2 = validLeaderboard[state.mode]!;
+  }
+
+  let supportedLanguages = validModes2[state.mode2];
+  if (supportedLanguages === undefined) {
+    const firstMode2 = Object.keys(validModes2).sort(
+      (a, b) => parseInt(a) - parseInt(b)
+    )[0];
+    if (firstMode2 === undefined) {
+      throw new Error(
+        `no valid leaderboard config for type ${state.type} and mode ${state.mode}`
+      );
+    }
+    state.mode2 = firstMode2;
+    supportedLanguages = validModes2[state.mode2];
+  }
+
+  if (supportedLanguages === undefined || supportedLanguages.length < 1) {
+    throw new Error(
+      `Daily leaderboard config not valid for mode:${state.mode} mode2:${state.mode2}`
+    );
+  }
+
+  if (!supportedLanguages.includes(state.language)) {
+    state.language = supportedLanguages.sort()[0] as Language;
+  }
+}
+
+async function appendModeAndLanguageButtons(): Promise<void> {
+  const modes = Array.from(
+    new Set(
+      Object.values(validLeaderboards).flatMap(
+        (rule) => Object.keys(rule) as Mode[]
+      )
+    )
+  ).sort();
+
+  const mode2Buttons = modes.flatMap((mode) => {
+    const modes2 = Array.from(
+      new Set(
+        Object.values(validLeaderboards).flatMap((rule) =>
+          Object.keys(rule[mode] ?? {})
+        )
+      )
+    ).sort((a, b) => parseInt(a) - parseInt(b));
+
+    const icon = mode === "time" ? "fas fa-clock" : "fas fa-align-left";
+
+    return modes2.map(
+      (mode2) => `<button data-mode="${mode}" data-mode2="${mode2}">
+      <i class="${icon}"></i>
+       ${mode} ${mode2}
+    </button>`
+    );
+  });
+  $(".modeButtons").html(
+    `<div class="divider"></div>` + mode2Buttons.join("\n")
+  );
+
+  const availableLanguages = Array.from(
+    new Set(
+      Object.values(validLeaderboards)
+        .flatMap((rule) => Object.values(rule))
+        .flatMap((mode) => Object.values(mode))
+        .flatMap((it) => it)
+    )
+  ).sort();
+
+  const languageButtons = availableLanguages.map(
+    (lang) =>
+      `<button data-language="${lang}">
+          <i class="fas fa-globe"></i>
+          ${lang}
+        </button>`
+  );
+  $(".languageButtons").html(
+    `<div class="divider"></div>` + languageButtons.join("\n")
+  );
 }
 
 function disableButtons(): void {
@@ -1064,20 +1242,17 @@ function handleJumpButton(action: Action, page?: number): void {
     state.page = page;
   } else if (action === "userPage") {
     if (isAuthenticated()) {
-      const user = Auth?.currentUser;
-      if (user) {
-        const rank = state.userData?.rank;
-        if (rank) {
-          // - 1 to make sure position 50 with page size 50 is on the first page (page 0)
-          const page = Math.floor((rank - 1) / state.pageSize);
+      const rank = state.userData?.rank;
+      if (isSafeNumber(rank)) {
+        // - 1 to make sure position 50 with page size 50 is on the first page (page 0)
+        const page = Math.floor((rank - 1) / state.pageSize);
 
-          if (state.page === page) {
-            return;
-          }
-
-          state.page = page;
-          state.scrollToUserAfterFill = true;
+        if (state.page === page) {
+          return;
         }
+
+        state.page = page;
+        state.scrollToUserAfterFill = true;
       }
     }
   } else {
@@ -1113,6 +1288,7 @@ function updateGetParameters(): void {
   if (state.type === "allTime") {
     params.mode2 = state.mode2;
   } else if (state.type === "daily") {
+    params.mode = state.mode;
     params.language = state.language;
     params.mode2 = state.mode2;
     if (state.yesterday) {
@@ -1126,51 +1302,39 @@ function updateGetParameters(): void {
 
   params.page = state.page + 1;
 
-  const urlParams = serializeUrlSearchParams({
-    schema: UrlParameterSchema,
-    data: params,
-  });
-
-  const newUrl = `${window.location.pathname}?${urlParams.toString()}`;
-  window.history.replaceState({}, "", newUrl);
+  if (state.friendsOnly) {
+    params.friendsOnly = true;
+  }
+  page.setUrlParams(params);
 
   selectorLS.set(state);
 }
 
-function readGetParameters(): void {
-  const urlParams = new URLSearchParams(window.location.search);
-
-  if (urlParams.size === 0) {
+function readGetParameters(params?: UrlParameter): void {
+  if (params === undefined) {
     Object.assign(state, selectorLS.get());
     return;
   }
-
-  const parsed = parseUrlSearchParams({
-    schema: UrlParameterSchema,
-    input: urlParams,
-  });
-  if (!parsed.success) {
-    return;
-  }
-  const params = parsed.data;
 
   if (params.type !== undefined) {
     state.type = params.type;
   }
 
+  state.friendsOnly = params.friendsOnly ?? false;
+
   if (state.type === "allTime") {
-    if (params.mode2) {
-      state.mode2 = params.mode2;
+    if (params.mode2 !== undefined) {
+      state.mode2 = params.mode2 as AllTimeState["mode2"];
     }
   } else if (state.type === "daily") {
     if (params.language !== undefined) {
       state.language = params.language;
     }
-    if (state.language === undefined) {
-      state.language = "english";
-    }
     if (params.mode2 !== undefined) {
       state.mode2 = params.mode2;
+    }
+    if (params.mode !== undefined) {
+      state.mode = params.mode;
     }
     if (params.yesterday !== undefined) {
       state.yesterday = params.yesterday;
@@ -1188,7 +1352,7 @@ function readGetParameters(): void {
       state.page = 0;
     }
   }
-  if (params.goToUserPage) {
+  if (params.goToUserPage === true) {
     state.goToUserPage = true;
   }
 }
@@ -1211,6 +1375,13 @@ function updateTimeText(
   const text = $(".page.pageLeaderboards .bigtitle .subtext > .text");
   text.text(`${dateString}`);
   text.attr("aria-label", localDateString);
+}
+
+function formatRank(rank: number | undefined): string {
+  if (rank === undefined) return "";
+  if (rank === 1) return '<i class="fas fa-fw fa-crown"></i>';
+
+  return rank.toString();
 }
 
 $(".page.pageLeaderboards .jumpButtons button").on("click", function () {
@@ -1239,68 +1410,109 @@ $(".page.pageLeaderboards .buttonGroup.typeButtons").on(
     if (state.type === "weekly") {
       state.lastWeek = false;
     }
+    checkIfLeaderboardIsValid();
     state.data = null;
     state.page = 0;
     void requestData();
-    updateTypeButtons();
     updateTitle();
-    updateSecondaryButtons();
+    updateSideButtons();
     updateContent();
     updateGetParameters();
   }
 );
 
-$(".page.pageLeaderboards .buttonGroup.secondary").on(
+$(".page.pageLeaderboards .buttonGroup.modeButtons").on(
   "click",
   "button",
   function () {
-    const mode = $(this).attr("data-mode") as "15" | "60" | undefined;
-    const language = $(this).data("language") as string;
+    const mode = $(this).attr("data-mode") as Mode;
+    const mode2 = $(this).attr("data-mode2");
+
     if (
       mode !== undefined &&
+      mode2 !== undefined &&
       (state.type === "allTime" || state.type === "daily")
     ) {
-      if (state.mode2 === mode) return;
-      state.mode2 = mode;
+      if (state.mode === mode && state.mode2 === mode2) return;
+      state.mode = mode;
+      state.mode2 = mode2;
       state.page = 0;
-    } else if (language !== undefined && state.type === "daily") {
+    } else {
+      return;
+    }
+    checkIfLeaderboardIsValid();
+    state.data = null;
+    void requestData();
+    updateSideButtons();
+    updateTitle();
+    updateContent();
+    updateGetParameters();
+  }
+);
+
+$(".page.pageLeaderboards .buttonGroup.languageButtons").on(
+  "click",
+  "button",
+  function () {
+    const language = $(this).attr("data-language") as Language;
+
+    if (language !== undefined && state.type === "daily") {
       if (state.language === language) return;
       state.language = language;
       state.page = 0;
     } else {
       return;
     }
+    checkIfLeaderboardIsValid();
     state.data = null;
     void requestData();
-    updateSecondaryButtons();
+    updateSideButtons();
     updateTitle();
     updateContent();
     updateGetParameters();
   }
 );
 
-export const page = new Page({
+$(".page.pageLeaderboards .buttonGroup.friendsOnlyButtons").on(
+  "click",
+  "button",
+  () => {
+    state.friendsOnly = !state.friendsOnly;
+    state.page = 0;
+    void requestData();
+    updateTitle();
+    updateSideButtons();
+    updateContent();
+    updateGetParameters();
+  }
+);
+
+export const page = new PageWithUrlParams({
   id: "leaderboards",
   element: $(".page.pageLeaderboards"),
   path: "/leaderboards",
+  urlParamsSchema: UrlParameterSchema,
+
   afterHide: async (): Promise<void> => {
     Skeleton.remove("pageLeaderboards");
     stopTimer();
   },
-  beforeShow: async (): Promise<void> => {
+  beforeShow: async (options): Promise<void> => {
+    await ServerConfiguration.configurationPromise;
     Skeleton.append("pageLeaderboards", "main");
-    // await appendLanguageButtons(); //todo figure out this race condition
-    readGetParameters();
+    await updateValidDailyLeaderboards();
+    await appendModeAndLanguageButtons();
+    readGetParameters(options.urlParams);
+    checkIfLeaderboardIsValid();
     startTimer();
-    updateTypeButtons();
     updateTitle();
-    updateSecondaryButtons();
     updateContent();
+    updateSideButtons();
     updateGetParameters();
     void requestData(false);
   },
   afterShow: async (): Promise<void> => {
-    updateSecondaryButtons();
+    // updateSideButtons();
   },
 });
 
@@ -1312,6 +1524,5 @@ ConfigEvent.subscribe((eventKey) => {
   if (ActivePage.get() === "leaderboards" && eventKey === "typingSpeedUnit") {
     updateContent();
     fillUser();
-    fillAvatars();
   }
 });

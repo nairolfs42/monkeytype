@@ -8,11 +8,15 @@ import AnimatedModal, {
   ShowOptions,
 } from "../utils/animated-modal";
 import { LayoutsList } from "../constants/layouts";
+import { tryCatch } from "@monkeytype/util/trycatch";
+import { LanguageList } from "../constants/languages";
+import { Language } from "@monkeytype/schemas/languages";
+import { LayoutObject } from "@monkeytype/schemas/layouts";
 
 type FilterPreset = {
   display: string;
-  getIncludeString: (layout: JSONData.Layout) => string[];
-  getExcludeString: (layout: JSONData.Layout) => string[];
+  getIncludeString: (layout: LayoutObject) => string[][];
+  getExcludeString: (layout: LayoutObject) => string[][];
 };
 
 const presets: Record<string, FilterPreset> = {
@@ -98,24 +102,8 @@ const presets: Record<string, FilterPreset> = {
 
 async function initSelectOptions(): Promise<void> {
   $("#wordFilterModal .languageInput").empty();
-
   $("#wordFilterModal .layoutInput").empty();
-
   $("wordFilterModal .presetInput").empty();
-
-  let LanguageList;
-
-  try {
-    LanguageList = await JSONData.getLanguageList();
-  } catch (e) {
-    console.error(
-      Misc.createErrorMessage(
-        e,
-        "Failed to initialise word filter popup language list"
-      )
-    );
-    return;
-  }
 
   LanguageList.forEach((language) => {
     const prettyLang = language.replace(/_/gi, " ");
@@ -176,7 +164,7 @@ function hide(hideOptions?: HideOptions<OutgoingData>): void {
   });
 }
 
-async function filter(language: string): Promise<string[]> {
+async function filter(language: Language): Promise<string[]> {
   let filterin = $("#wordFilterModal .wordIncludeInput").val() as string;
   filterin = Misc.escapeRegExp(filterin?.trim());
   filterin = filterin.replace(/\s+/gi, "|");
@@ -187,12 +175,12 @@ async function filter(language: string): Promise<string[]> {
   const regexcl = new RegExp(filterout, "i");
   const filteredWords = [];
 
-  let languageWordList;
-  try {
-    languageWordList = await JSONData.getLanguage(language);
-  } catch (e) {
+  const { data: languageWordList, error } = await tryCatch(
+    JSONData.getLanguage(language)
+  );
+  if (error) {
     Notifications.add(
-      Misc.createErrorMessage(e, "Failed to filter language words"),
+      Misc.createErrorMessage(error, "Failed to filter language words"),
       -1
     );
     return [];
@@ -227,7 +215,7 @@ async function filter(language: string): Promise<string[]> {
 }
 
 async function apply(set: boolean): Promise<void> {
-  const language = $("#wordFilterModal .languageInput").val() as string;
+  const language = $("#wordFilterModal .languageInput").val() as Language;
   const filteredWords = await filter(language);
 
   if (filteredWords.length === 0) {

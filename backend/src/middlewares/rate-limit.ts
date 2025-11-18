@@ -1,4 +1,3 @@
-import _ from "lodash";
 import MonkeyError from "../utils/error";
 import type { Response, NextFunction, Request } from "express";
 import { RateLimiterMemory } from "rate-limiter-flexible";
@@ -129,7 +128,7 @@ export function rateLimitRequest<
         )
       );
     } else {
-      rateLimiter(req, res, next);
+      await rateLimiter(req, res, next);
     }
   };
 }

@@ -1,4 +1,3 @@
-import _ from "lodash";
 import * as db from "../init/db";
 import {
   type Filter,
@@ -8,7 +7,7 @@ import {
   Collection,
 } from "mongodb";
 import MonkeyError from "../utils/error";
-import { ApeKey } from "@monkeytype/contracts/schemas/ape-keys";
+import { ApeKey } from "@monkeytype/schemas/ape-keys";
 
 export type DBApeKey = ApeKey & {
   _id: ObjectId;
@@ -52,8 +51,12 @@ async function updateApeKey(
   const updateResult = await getApeKeysCollection().updateOne(
     getApeKeyFilter(uid, keyId),
     {
-      $inc: { useCount: _.has(updates, "lastUsedOn") ? 1 : 0 },
-      $set: _.pickBy(updates, (value) => !_.isNil(value)),
+      $inc: { useCount: "lastUsedOn" in updates ? 1 : 0 },
+      $set: Object.fromEntries(
+        Object.entries(updates).filter(
+          ([_, value]) => value !== null && value !== undefined
+        )
+      ),
     }
   );
 

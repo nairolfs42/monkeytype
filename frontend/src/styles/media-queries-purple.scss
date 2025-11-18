@@ -15,17 +15,32 @@
   .ad.ad-h-s {
     display: grid;
   }
-  .pageAccountSettings {
-    .main {
-      .tabs {
-        grid-auto-flow: row;
-      }
-    }
-  }
+
   .pageLeaderboards {
     .content .bigtitle .text:after {
       left: 0.1rem;
       transform: none;
+    }
+    .content .tableAndUser {
+      font-size: clamp(0.7rem, 2.8vw, 0.9rem);
+      .bigUser {
+        gap: 1.5em;
+      }
+      table {
+        td {
+          padding: 0.5em;
+        }
+        .avatarNameBadge .flagsAndBadge .badge .text {
+          display: none;
+        }
+        tbody td:nth-child(2) {
+          width: 100%;
+        }
+      }
+      .bigUser {
+        padding: 0.5em;
+        padding-left: 1em;
+      }
     }
   }
   header {
@@ -279,7 +294,7 @@
       }
     }
   }
-  #testActivity {
+  .testActivity {
     .wrapper {
       width: 100%;
       .top {
@@ -299,5 +314,20 @@
   .popupWrapper .modal .inputs.withLabel,
   .modalWrapper .modal .inputs.withLabel {
     grid-template-columns: 1fr;
+  }
+
+  .pageFriends {
+    .content .friends table {
+      td:nth-child(5),
+      td:nth-child(6) {
+        display: none;
+      }
+    }
+  }
+
+  .pageAccountSettings [data-tab="blockedUsers"] {
+    table {
+      font-size: 0.75rem;
+    }
   }
 }

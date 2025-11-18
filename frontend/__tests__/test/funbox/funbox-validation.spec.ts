@@ -1,11 +1,13 @@
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { canSetConfigWithCurrentFunboxes } from "../../../src/ts/test/funbox/funbox-validation";
 
 import * as Notifications from "../../../src/ts/elements/notifications";
+import { FunboxName } from "@monkeytype/schemas/configs";
 describe("funbox-validation", () => {
   describe("canSetConfigWithCurrentFunboxes", () => {
     const addNotificationMock = vi.spyOn(Notifications, "add");
     afterEach(() => {
-      addNotificationMock.mockReset();
+      addNotificationMock.mockClear();
     });
 
     const testCases = [
@@ -60,7 +62,7 @@ describe("funbox-validation", () => {
       `check $funbox with $key=$value`,
       ({ key, value, funbox, error }) => {
         expect(
-          canSetConfigWithCurrentFunboxes(key, value, funbox.join("#"))
+          canSetConfigWithCurrentFunboxes(key, value, funbox as FunboxName[])
         ).toBe(error === undefined);
 
         if (error !== undefined) {

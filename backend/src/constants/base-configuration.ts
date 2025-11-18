@@ -1,4 +1,4 @@
-import { Configuration } from "@monkeytype/contracts/schemas/configuration";
+import { Configuration } from "@monkeytype/schemas/configuration";
 
 /**
  * This is the base schema for the configuration of the API backend.
@@ -103,6 +103,7 @@ export const BASE_CONFIGURATION: Configuration = {
       xpRewardBrackets: [],
     },
   },
+  connections: { enabled: false, maxPerUser: 100 },
 };
 
 type BaseSchema = {
@@ -600,6 +601,17 @@ export const CONFIGURATION_FORM_SCHEMA: ObjectSchema<Configuration> = {
               },
             },
           },
+        },
+      },
+    },
+    connections: {
+      type: "object",
+      label: "Connections",
+      fields: {
+        enabled: { type: "boolean", label: "Enabled" },
+        maxPerUser: {
+          type: "number",
+          label: "Max Connections per user",
         },
       },
     },

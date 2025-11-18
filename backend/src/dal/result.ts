@@ -1,15 +1,15 @@
-import _ from "lodash";
 import {
   Collection,
   type DeleteResult,
+  Filter,
   ObjectId,
   type UpdateResult,
 } from "mongodb";
 import MonkeyError from "../utils/error";
 import * as db from "../init/db";
-
-import { getUser, getTags, DBUser } from "./user";
-import { DBResult } from "../utils/result";
+import { getUser, getTags } from "./user";
+import { DBResult, replaceLegacyValues } from "../utils/result";
+import { tryCatch } from "@monkeytype/util/trycatch";
 
 export const getResultCollection = (): Collection<DBResult> =>
   db.collection<DBResult>("results");
@@ -18,12 +18,8 @@ export async function addResult(
   uid: string,
   result: DBResult
 ): Promise<{ insertedId: ObjectId }> {
-  let user: DBUser | null = null;
-  try {
-    user = await getUser(uid, "add result");
-  } catch (e) {
-    user = null;
-  }
+  const { data: user } = await tryCatch(getUser(uid, "add result"));
+
   if (!user) throw new MonkeyError(404, "User not found", "add result");
   if (result.uid === undefined) result.uid = uid;
   // result.ir = true;
@@ -67,25 +63,41 @@ export async function getResult(uid: string, id: string): Promise<DBResult> {
     _id: new ObjectId(id),
     uid,
   });
+
   if (!result) throw new MonkeyError(404, "Result not found");
-  return result;
+  return replaceLegacyValues(result);
 }
 
 export async function getLastResult(uid: string): Promise<DBResult> {
-  const [lastResult] = await getResultCollection()
-    .find({ uid })
-    .sort({ timestamp: -1 })
-    .limit(1)
-    .toArray();
-  if (!lastResult) throw new MonkeyError(404, "No results found");
-  return lastResult;
+  const lastResult = await getResultCollection().findOne(
+    { uid },
+    { sort: { timestamp: -1 } }
+  );
+
+  if (lastResult === null) throw new MonkeyError(404, "No last result found");
+  return replaceLegacyValues(lastResult);
+}
+
+export async function getLastResultTimestamp(uid: string): Promise<number> {
+  const lastResult = await getResultCollection().findOne(
+    { uid },
+    {
+      projection: { timestamp: 1, _id: 0 },
+      sort: { timestamp: -1 },
+    }
+  );
+
+  if (lastResult === null) throw new MonkeyError(404, "No last result found");
+  return lastResult.timestamp;
 }
 
 export async function getResultByTimestamp(
   uid: string,
   timestamp: number
 ): Promise<DBResult | null> {
-  return await getResultCollection().findOne({ uid, timestamp });
+  const result = await getResultCollection().findOne({ uid, timestamp });
+  if (result === null) return null;
+  return replaceLegacyValues(result);
 }
 
 type GetResultsOpts = {
@@ -99,24 +111,25 @@ export async function getResults(
   opts?: GetResultsOpts
 ): Promise<DBResult[]> {
   const { onOrAfterTimestamp, offset, limit } = opts ?? {};
+
+  const condition: Filter<DBResult> = { uid };
+  if (
+    onOrAfterTimestamp !== undefined &&
+    onOrAfterTimestamp !== null &&
+    !isNaN(onOrAfterTimestamp)
+  ) {
+    condition.timestamp = { $gte: onOrAfterTimestamp };
+  }
+
   let query = getResultCollection()
-    .find(
-      {
-        uid,
-        ...(!_.isNil(onOrAfterTimestamp) &&
-          !_.isNaN(onOrAfterTimestamp) && {
-            timestamp: { $gte: onOrAfterTimestamp },
-          }),
+    .find(condition, {
+      projection: {
+        chartData: 0,
+        keySpacingStats: 0,
+        keyDurationStats: 0,
+        name: 0,
       },
-      {
-        projection: {
-          chartData: 0,
-          keySpacingStats: 0,
-          keyDurationStats: 0,
-          name: 0,
-        },
-      }
-    )
+    })
     .sort({ timestamp: -1 });
 
   if (limit !== undefined) {
@@ -128,5 +141,5 @@ export async function getResults(
 
   const results = await query.toArray();
   if (results === undefined) throw new MonkeyError(404, "Result not found");
-  return results;
+  return results.map(replaceLegacyValues);
 }

@@ -1,16 +1,12 @@
 import * as Loader from "../elements/loader";
-import { envConfig } from "../constants/env-config";
+import { envConfig } from "virtual:env-config";
 import { lastElementFromArray } from "./arrays";
-import { Config } from "@monkeytype/contracts/schemas/configs";
-import {
-  Mode,
-  Mode2,
-  PersonalBests,
-} from "@monkeytype/contracts/schemas/shared";
-import {
-  CustomTextDataWithTextLen,
-  Result,
-} from "@monkeytype/contracts/schemas/results";
+import { Config } from "@monkeytype/schemas/configs";
+import { Mode, Mode2, PersonalBests } from "@monkeytype/schemas/shared";
+import { Result } from "@monkeytype/schemas/results";
+import { RankAndCount } from "@monkeytype/schemas/users";
+import { roundTo2 } from "@monkeytype/util/numbers";
+import { animate, AnimationParams } from "animejs";
 
 export function whorf(speed: number, wordlen: number): number {
   return Math.min(
@@ -171,18 +167,22 @@ export function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function escapeHTML(str: string): string {
+export function escapeHTML<T extends string | null | undefined>(str: T): T {
   if (str === null || str === undefined) {
     return str;
   }
-  str = str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 
-  return str;
+  const escapeMap: Record<string, string> = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+    "/": "&#x2F;",
+    "`": "&#x60;",
+  };
+
+  return str.replace(/[&<>"'/`]/g, (char) => escapeMap[char] as string) as T;
 }
 
 export function isUsernameValid(name: string): boolean {
@@ -192,39 +192,6 @@ export function isUsernameValid(name: string): boolean {
   if (name.length > 14) return false;
   if (/^\..*/.test(name.toLowerCase())) return false;
   return /^[0-9a-zA-Z_.-]+$/.test(name);
-}
-
-export function canQuickRestart(
-  mode: string,
-  words: number,
-  time: number,
-  CustomText: Omit<CustomTextDataWithTextLen, "textLen">,
-  customTextIsLong: boolean
-): boolean {
-  const wordsLong = mode === "words" && (words >= 1000 || words === 0);
-  const timeLong = mode === "time" && (time >= 900 || time === 0);
-  const customTextLong = mode === "custom" && customTextIsLong;
-
-  const customTextRandomWordsLong =
-    mode === "custom" &&
-    (CustomText.limit.mode === "word" || CustomText.limit.mode === "section") &&
-    (CustomText.limit.value >= 1000 || CustomText.limit.value === 0);
-  const customTextRandomTimeLong =
-    mode === "custom" &&
-    CustomText.limit.mode === "time" &&
-    (CustomText.limit.value >= 900 || CustomText.limit.value === 0);
-
-  if (
-    wordsLong ||
-    timeLong ||
-    customTextLong ||
-    customTextRandomWordsLong ||
-    customTextRandomTimeLong
-  ) {
-    return false;
-  } else {
-    return true;
-  }
 }
 
 export function clearTimeouts(timeouts: (number | NodeJS.Timeout)[]): void {
@@ -259,39 +226,9 @@ type LastIndex = {
 
 export const trailingComposeChars = /[\u02B0-\u02FF`´^¨~]+$|⎄.*$/;
 
-export async function getDiscordAvatarUrl(
-  discordId?: string,
-  discordAvatar?: string,
-  discordAvatarSize = 32
-): Promise<string | null> {
-  if (
-    discordId === undefined ||
-    discordId === "" ||
-    discordAvatar === undefined ||
-    discordAvatar === ""
-  ) {
-    return null;
-  }
-  // An invalid request to this URL will return a 404.
-  try {
-    const avatarUrl = `https://cdn.discordapp.com/avatars/${discordId}/${discordAvatar}.png?size=${discordAvatarSize}`;
-
-    const response = await fetch(avatarUrl, {
-      method: "HEAD",
-    });
-    if (!response.ok) {
-      return null;
-    }
-
-    return avatarUrl;
-  } catch (error) {}
-
-  return null;
-}
-
 export async function swapElements(
-  el1: JQuery,
-  el2: JQuery,
+  el1: HTMLElement,
+  el2: HTMLElement,
   totalDuration: number,
   callback = async function (): Promise<void> {
     return Promise.resolve();
@@ -300,57 +237,49 @@ export async function swapElements(
     return Promise.resolve();
   }
 ): Promise<boolean | undefined> {
+  if (el1 === null || el2 === null) {
+    return;
+  }
+
   totalDuration = applyReducedMotion(totalDuration);
   if (
-    (el1.hasClass("hidden") && !el2.hasClass("hidden")) ||
-    (!el1.hasClass("hidden") && el2.hasClass("hidden"))
+    (el1.classList.contains("hidden") && !el2.classList.contains("hidden")) ||
+    (!el1.classList.contains("hidden") && el2.classList.contains("hidden"))
   ) {
     //one of them is hidden and the other is visible
-    if (el1.hasClass("hidden")) {
+    if (el1.classList.contains("hidden")) {
       await middleCallback();
       await callback();
       return false;
     }
-    $(el1)
-      .removeClass("hidden")
-      .css("opacity", 1)
-      .animate(
-        {
-          opacity: 0,
-        },
-        totalDuration / 2,
-        async () => {
-          await middleCallback();
-          $(el1).addClass("hidden");
-          $(el2)
-            .removeClass("hidden")
-            .css("opacity", 0)
-            .animate(
-              {
-                opacity: 1,
-              },
-              totalDuration / 2,
-              async () => {
-                await callback();
-              }
-            );
-        }
-      );
-  } else if (el1.hasClass("hidden") && el2.hasClass("hidden")) {
+
+    el1.classList.remove("hidden");
+    await promiseAnimate(el1, {
+      opacity: [1, 0],
+      duration: totalDuration / 2,
+    });
+    el1.classList.add("hidden");
+    await middleCallback();
+    el2.classList.remove("hidden");
+    await promiseAnimate(el2, {
+      opacity: [0, 1],
+      duration: totalDuration / 2,
+    });
+    await callback();
+  } else if (
+    el1.classList.contains("hidden") &&
+    el2.classList.contains("hidden")
+  ) {
     //both are hidden, only fade in the second
     await middleCallback();
-    $(el2)
-      .removeClass("hidden")
-      .css("opacity", 0)
-      .animate(
-        {
-          opacity: 1,
-        },
-        totalDuration,
-        async () => {
-          await callback();
-        }
-      );
+
+    el2.classList.remove("hidden");
+    await promiseAnimate(el2, {
+      opacity: [0, 1],
+      duration: totalDuration / 2,
+    });
+
+    await callback();
   } else {
     await middleCallback();
     await callback();
@@ -519,14 +448,51 @@ export function isAnyPopupVisible(): boolean {
   return popupVisible;
 }
 
-export async function promiseAnimation(
-  el: JQuery,
-  animation: Record<string, string>,
-  duration: number,
-  easing: string
+export type JQueryEasing =
+  | "linear"
+  | "swing"
+  | "easeInSine"
+  | "easeOutSine"
+  | "easeInOutSine"
+  | "easeInQuad"
+  | "easeOutQuad"
+  | "easeInOutQuad"
+  | "easeInCubic"
+  | "easeOutCubic"
+  | "easeInOutCubic"
+  | "easeInQuart"
+  | "easeOutQuart"
+  | "easeInOutQuart"
+  | "easeInQuint"
+  | "easeOutQuint"
+  | "easeInOutQuint"
+  | "easeInExpo"
+  | "easeOutExpo"
+  | "easeInOutExpo"
+  | "easeInCirc"
+  | "easeOutCirc"
+  | "easeInOutCirc"
+  | "easeInBack"
+  | "easeOutBack"
+  | "easeInOutBack"
+  | "easeInElastic"
+  | "easeOutElastic"
+  | "easeInOutElastic"
+  | "easeInBounce"
+  | "easeOutBounce"
+  | "easeInOutBounce";
+
+export async function promiseAnimate(
+  el: HTMLElement,
+  options: AnimationParams
 ): Promise<void> {
   return new Promise((resolve) => {
-    el.animate(animation, applyReducedMotion(duration), easing, resolve);
+    animate(el, {
+      ...options,
+      onComplete: () => {
+        resolve();
+      },
+    });
   });
 }
 
@@ -546,7 +512,7 @@ export function isPasswordStrong(password: string): boolean {
 export function htmlToText(html: string): string {
   const el = document.createElement("div");
   el.innerHTML = html;
-  return (el.textContent as string) || el.innerText || "";
+  return el.textContent || el.innerText || "";
 }
 
 export function loadCSS(href: string, prepend = false): void {
@@ -656,32 +622,6 @@ export function isObject(obj: unknown): obj is Record<string, unknown> {
   return typeof obj === "object" && !Array.isArray(obj) && obj !== null;
 }
 
-export function deepClone<T>(obj: T[]): T[];
-export function deepClone<T extends object>(obj: T): T;
-export function deepClone<T>(obj: T): T;
-export function deepClone<T>(obj: T | T[]): T | T[] {
-  // Check if the value is a primitive (not an object or array)
-  if (obj === null || typeof obj !== "object") {
-    return obj;
-  }
-
-  // Handle arrays
-  if (Array.isArray(obj)) {
-    return obj.map((item) => deepClone(item));
-  }
-
-  // Handle objects
-  const clonedObj = {} as { [K in keyof T]: T[K] };
-
-  for (const key in obj) {
-    if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      clonedObj[key] = deepClone((obj as { [K in keyof T]: T[K] })[key]);
-    }
-  }
-
-  return clonedObj;
-}
-
 export function prefersReducedMotion(): boolean {
   return matchMedia?.("(prefers-reduced-motion)")?.matches;
 }
@@ -711,6 +651,153 @@ export function promiseWithResolvers<T = void>(): {
     reject = rej;
   });
   return { resolve, reject, promise };
+}
+
+/**
+ * Wrap a function so only one call runs at a time. While a call is running, new
+ * calls will not run and only the latest one will be queued, any prior queued
+ * calls are skipped. Once the running call finishes, the queued call runs.
+ * @param fn the function to debounce
+ * @param options - `rejectSkippedCalls`: if false, promises returned by skipped
+ * calls will be resolved to null, otherwise will be rejected (defaults to true).
+ * @returns debounced version of the original function. This debounced function
+ * returns a promise that resolves to the original return value. Promises of skipped
+ * calls will be rejected, (or resolved to null if `options.rejectSkippedCalls` was false).
+ */
+export function debounceUntilResolved<TArgs extends unknown[], TResult>(
+  fn: (...args: TArgs) => TResult,
+  options?: { rejectSkippedCalls?: true }
+): (...args: TArgs) => Promise<TResult>;
+export function debounceUntilResolved<TArgs extends unknown[], TResult>(
+  fn: (...args: TArgs) => TResult,
+  options: { rejectSkippedCalls: false }
+): (...args: TArgs) => Promise<TResult | null>;
+export function debounceUntilResolved<TArgs extends unknown[], TResult>(
+  fn: (...args: TArgs) => TResult,
+  { rejectSkippedCalls = true }: { rejectSkippedCalls?: boolean } = {}
+): (...args: TArgs) => Promise<TResult | null> {
+  let isLocked = false;
+  let next: {
+    args: TArgs;
+    resolve: (value: TResult | null) => void;
+    reject: (reason?: unknown) => void;
+  } | null = null;
+
+  async function run(...args: TArgs): Promise<TResult> {
+    isLocked = true;
+    try {
+      return await Promise.resolve(fn(...args));
+    } finally {
+      isLocked = false;
+
+      const queued = next;
+      next = null;
+      if (queued) run(...queued.args).then(queued.resolve, queued.reject);
+    }
+  }
+
+  return async function debounced(...args: TArgs): Promise<TResult | null> {
+    if (isLocked) {
+      // drop previously queued call
+      if (next) {
+        if (rejectSkippedCalls) {
+          next.reject(
+            new Error("skipped call: call was superseded by a more recent one")
+          );
+        } else {
+          next.resolve(null);
+        }
+      }
+
+      // queue the new call
+      return new Promise<TResult | null>((resolve, reject) => {
+        next = { args, resolve, reject };
+      });
+    }
+    // no running instances, run immediately
+    return run(...args);
+  };
+}
+
+export function triggerResize(): void {
+  $(window).trigger("resize");
+}
+
+export type RequiredProperties<T, K extends keyof T> = Omit<T, K> &
+  Required<Pick<T, K>>;
+
+function isPlatform(searchTerm: string | RegExp): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-deprecated
+  const platform = navigator.platform;
+  if (typeof searchTerm === "string") {
+    return platform.includes(searchTerm);
+  } else {
+    return searchTerm.test(platform);
+  }
+}
+
+export function isLinux(): boolean {
+  return isPlatform("Linux");
+}
+
+export function isMac(): boolean {
+  return isPlatform("Mac");
+}
+
+export function isMacLike(): boolean {
+  return isPlatform(/Mac|iPod|iPhone|iPad/);
+}
+
+export function scrollToCenterOrTop(el: HTMLElement | null): void {
+  if (!el) return;
+
+  const elementHeight = el.offsetHeight;
+  const windowHeight = window.innerHeight;
+
+  el.scrollIntoView({
+    block: elementHeight < windowHeight ? "center" : "start",
+  });
+}
+
+export function formatTopPercentage(lbRank: RankAndCount): string {
+  if (lbRank.rank === undefined) return "-";
+  if (lbRank.rank === 1) return "GOAT";
+  return "Top " + roundTo2((lbRank.rank / lbRank.count) * 100) + "%";
+}
+
+export function formatTypingStatsRatio(stats: {
+  startedTests?: number;
+  completedTests?: number;
+}): {
+  completedPercentage: string;
+  restartRatio: string;
+} {
+  if (stats.completedTests === undefined || stats.startedTests === undefined) {
+    return { completedPercentage: "", restartRatio: "" };
+  }
+  return {
+    completedPercentage: Math.floor(
+      (stats.completedTests / stats.startedTests) * 100
+    ).toString(),
+    restartRatio: (
+      (stats.startedTests - stats.completedTests) /
+      stats.completedTests
+    ).toFixed(1),
+  };
+}
+
+export function addToGlobal(items: Record<string, unknown>): void {
+  for (const [name, item] of Object.entries(items)) {
+    //@ts-expect-error dev
+    window[name] = item;
+  }
+}
+
+export function getTotalInlineMargin(element: HTMLElement): number {
+  const computedStyle = window.getComputedStyle(element);
+  return (
+    parseInt(computedStyle.marginRight) + parseInt(computedStyle.marginLeft)
+  );
 }
 
 // DO NOT ALTER GLOBAL OBJECTSONSTRUCTOR, IT WILL BREAK RESULT HASHES

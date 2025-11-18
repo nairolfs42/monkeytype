@@ -1,11 +1,6 @@
-import _ from "lodash";
-import {
-  Mode,
-  PersonalBest,
-  PersonalBests,
-} from "@monkeytype/contracts/schemas/shared";
-import { Result as ResultType } from "@monkeytype/contracts/schemas/results";
-import { getFunboxesFromString } from "@monkeytype/funbox";
+import { Mode, PersonalBest, PersonalBests } from "@monkeytype/schemas/shared";
+import { Result as ResultType } from "@monkeytype/schemas/results";
+import { getFunbox } from "@monkeytype/funbox";
 
 export type LbPersonalBests = {
   time: Record<number, Record<string, PersonalBest>>;
@@ -20,16 +15,9 @@ type CheckAndUpdatePbResult = {
 type Result = Omit<ResultType<Mode>, "_id" | "name">;
 
 export function canFunboxGetPb(result: Result): boolean {
-  const funboxString = result.funbox;
-  if (
-    funboxString === undefined ||
-    funboxString === "" ||
-    funboxString === "none"
-  ) {
-    return true;
-  }
+  if (result.funbox === undefined || result.funbox.length === 0) return true;
 
-  return getFunboxesFromString(funboxString).every((f) => f.canGetPb);
+  return getFunbox(result.funbox).every((f) => f.canGetPb);
 }
 
 export function checkAndUpdatePb(
@@ -57,7 +45,7 @@ export function checkAndUpdatePb(
     (userPb[mode][mode2] as PersonalBest[]).push(buildPersonalBest(result));
   }
 
-  if (!_.isNil(lbPersonalBests)) {
+  if (lbPersonalBests !== undefined && lbPersonalBests !== null) {
     const newLbPb = updateLeaderboardPersonalBests(
       userPb,
       lbPersonalBests,
@@ -197,9 +185,11 @@ export function updateLeaderboardPersonalBests(
       }
     }
   );
-  _.each(bestForEveryLanguage, (pb: PersonalBest, language: string) => {
+  Object.entries(bestForEveryLanguage).forEach(([language, pb]) => {
     const languageDoesNotExist = lbPb[mode][mode2]?.[language] === undefined;
-    const languageIsEmpty = _.isEmpty(lbPb[mode][mode2]?.[language]);
+    const languageIsEmpty =
+      lbPb[mode][mode2]?.[language] &&
+      Object.keys(lbPb[mode][mode2][language]).length === 0;
 
     if (
       (languageDoesNotExist ||

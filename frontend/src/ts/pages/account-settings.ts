@@ -1,4 +1,4 @@
-import Page from "./page";
+import { PageWithUrlParams } from "./page";
 import * as Skeleton from "../utils/skeleton";
 import { getAuthenticatedUser, isAuthenticated } from "../firebase";
 import * as ActivePage from "../states/active-page";
@@ -8,16 +8,28 @@ import Ape from "../ape";
 import * as StreakHourOffsetModal from "../modals/streak-hour-offset";
 import * as Loader from "../elements/loader";
 import * as ApeKeyTable from "../elements/account-settings/ape-key-table";
+import * as BlockedUserTable from "../elements/account-settings/blocked-user-table";
 import * as Notifications from "../elements/notifications";
+import { z } from "zod";
+import * as AuthEvent from "../observables/auth-event";
 
 const pageElement = $(".page.pageAccountSettings");
 
-type State = {
-  activeTab: "authentication" | "general" | "api" | "dangerZone";
-};
+const StateSchema = z.object({
+  tab: z.enum([
+    "authentication",
+    "account",
+    "apeKeys",
+    "dangerZone",
+    "blockedUsers",
+  ]),
+});
+type State = z.infer<typeof StateSchema>;
+
+const UrlParameterSchema = StateSchema.partial();
 
 const state: State = {
-  activeTab: "general",
+  tab: "account",
 };
 
 function updateAuthenticationSections(): void {
@@ -25,8 +37,8 @@ function updateAuthenticationSections(): void {
   pageElement.find(".section.googleAuthSettings button").addClass("hidden");
   pageElement.find(".section.githubAuthSettings button").addClass("hidden");
 
-  if (!isAuthenticated()) return;
   const user = getAuthenticatedUser();
+  if (user === null) return;
 
   const passwordProvider = user.providerData.some(
     (provider) => provider.providerId === "password"
@@ -121,21 +133,19 @@ function updateIntegrationSections(): void {
 
 function updateTabs(): void {
   void swapElements(
-    pageElement.find(".tab.active"),
-    pageElement.find(`.tab[data-tab="${state.activeTab}"]`),
+    pageElement.find(".tab.active")[0] as HTMLElement,
+    pageElement.find(`.tab[data-tab="${state.tab}"]`)[0] as HTMLElement,
     250,
     async () => {
       //
     },
     async () => {
       pageElement.find(".tab").removeClass("active");
-      pageElement
-        .find(`.tab[data-tab="${state.activeTab}"]`)
-        .addClass("active");
+      pageElement.find(`.tab[data-tab="${state.tab}"]`).addClass("active");
     }
   );
   pageElement.find("button").removeClass("active");
-  pageElement.find(`button[data-tab="${state.activeTab}"]`).addClass("active");
+  pageElement.find(`button[data-tab="${state.tab}"]`).addClass("active");
 }
 
 function updateAccountSections(): void {
@@ -179,12 +189,15 @@ export function updateUI(): void {
   updateIntegrationSections();
   updateAccountSections();
   void ApeKeyTable.update(updateUI);
+  void BlockedUserTable.update();
   updateTabs();
+  page.setUrlParams(state);
 }
 
 $(".page.pageAccountSettings").on("click", ".tabs button", (event) => {
-  state.activeTab = $(event.target).data("tab") as State["activeTab"];
+  state.tab = $(event.target).data("tab") as State["tab"];
   updateTabs();
+  page.setUrlParams(state);
 });
 
 $(
@@ -207,16 +220,27 @@ $(".page.pageAccountSettings #setStreakHourOffset").on("click", () => {
   StreakHourOffsetModal.show();
 });
 
-export const page = new Page({
+AuthEvent.subscribe((event) => {
+  if (event.type === "authConfigUpdated") {
+    updateUI();
+  }
+});
+
+export const page = new PageWithUrlParams({
   id: "accountSettings",
   display: "Account Settings",
   element: pageElement,
   path: "/account-settings",
+  urlParamsSchema: UrlParameterSchema,
   afterHide: async (): Promise<void> => {
     Skeleton.remove("pageAccountSettings");
   },
-  beforeShow: async (): Promise<void> => {
+  beforeShow: async (options): Promise<void> => {
+    if (options.urlParams?.tab !== undefined) {
+      state.tab = options.urlParams.tab;
+    }
     Skeleton.append("pageAccountSettings", "main");
+    pageElement.find(`.tab[data-tab="${state.tab}"]`).addClass("active");
     updateUI();
   },
 });

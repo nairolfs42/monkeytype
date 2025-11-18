@@ -1,4 +1,3 @@
-import _ from "lodash";
 import { contract } from "@monkeytype/contracts/index";
 import psas from "./psas";
 import publicStats from "./public";
@@ -16,6 +15,7 @@ import configs from "./configs";
 import configuration from "./configuration";
 import { version } from "../../version";
 import leaderboards from "./leaderboards";
+import connections from "./connections";
 import addSwaggerMiddlewares from "./swagger";
 import { MonkeyResponse } from "../../utils/monkey-response";
 import {
@@ -23,7 +23,6 @@ import {
   IRouter,
   NextFunction,
   Response,
-  Router,
   static as expressStatic,
 } from "express";
 import { isDevEnvironment } from "../../utils/misc";
@@ -31,7 +30,7 @@ import { getLiveConfiguration } from "../../init/configuration";
 import Logger from "../../utils/logger";
 import { createExpressEndpoints, initServer } from "@ts-rest/express";
 import { ZodIssue } from "zod";
-import { MonkeyValidationError } from "@monkeytype/contracts/schemas/api";
+import { MonkeyValidationError } from "@monkeytype/contracts/util/api";
 import { authenticateTsRestRequest } from "../../middlewares/auth";
 import { rateLimitRequest } from "../../middlewares/rate-limit";
 import { verifyPermissions } from "../../middlewares/permission";
@@ -61,6 +60,7 @@ const router = s.router(contract, {
   users,
   quotes,
   webhooks,
+  connections,
 });
 
 export function addApiRoutes(app: Application): void {
@@ -188,8 +188,8 @@ function applyApiRoutes(app: Application): void {
     );
   });
 
-  _.each(API_ROUTE_MAP, (router: Router, route) => {
+  for (const [route, router] of Object.entries(API_ROUTE_MAP)) {
     const apiRoute = `${BASE_ROUTE}${route}`;
     app.use(apiRoute, router);
-  });
+  }
 }

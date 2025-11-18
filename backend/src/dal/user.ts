@@ -1,4 +1,3 @@
-import _ from "lodash";
 import { canFunboxGetPb, checkAndUpdatePb, LbPersonalBests } from "../utils/pb";
 import * as db from "../init/db";
 import MonkeyError from "../utils/error";
@@ -9,7 +8,7 @@ import {
   type UpdateFilter,
   type Filter,
 } from "mongodb";
-import { flattenObjectDeep, WithObjectId } from "../utils/misc";
+import { flattenObjectDeep, isPlainObject, WithObjectId } from "../utils/misc";
 import { getCachedConfiguration } from "../init/configuration";
 import { getDayOfYear } from "date-fns";
 import { UTCDate } from "@date-fns/utc";
@@ -26,17 +25,15 @@ import {
   UserTag,
   User,
   CountByYearAndDay,
-} from "@monkeytype/contracts/schemas/users";
-import {
-  Mode,
-  Mode2,
-  PersonalBest,
-} from "@monkeytype/contracts/schemas/shared";
+  Friend,
+} from "@monkeytype/schemas/users";
+import { Mode, Mode2, PersonalBest } from "@monkeytype/schemas/shared";
 import { addImportantLog } from "./logs";
-import { Result as ResultType } from "@monkeytype/contracts/schemas/results";
-import { Configuration } from "@monkeytype/contracts/schemas/configuration";
+import { Result as ResultType } from "@monkeytype/schemas/results";
+import { Configuration } from "@monkeytype/schemas/configuration";
 import { isToday, isYesterday } from "@monkeytype/util/date-and-time";
 import GeorgeQueue from "../queues/george-queue";
+import { aggregateWithAcceptedConnections } from "./connections";
 
 export type DBUserTag = WithObjectId<UserTag>;
 
@@ -58,15 +55,20 @@ export type DBUser = Omit<
   inbox?: MonkeyMail[];
   ips?: string[];
   canReport?: boolean;
+  nameHistory?: string[];
   lastNameChange?: number;
   canManageApeKeys?: boolean;
   bananas?: number;
   testActivity?: CountByYearAndDay;
+  suspicious?: boolean;
+  note?: string;
 };
 
 const SECONDS_PER_HOUR = 3600;
 
 type Result = Omit<ResultType<Mode>, "_id" | "name">;
+
+export type DBFriend = Friend;
 
 // Export for use in tests
 export const getUsersCollection = (): Collection<DBUser> =>
@@ -268,13 +270,12 @@ export async function getPartialUser<K extends keyof DBUser>(
 }
 
 export async function findByName(name: string): Promise<DBUser | undefined> {
-  return (
-    await getUsersCollection()
-      .find({ name })
-      .collation({ locale: "en", strength: 1 })
-      .limit(1)
-      .toArray()
-  )[0];
+  const found = await getUsersCollection().findOne(
+    { name },
+    { collation: { locale: "en", strength: 1 } }
+  );
+
+  return found !== null ? found : undefined;
 }
 
 export async function isNameAvailable(
@@ -454,7 +455,12 @@ export async function checkIfPb(
   const { mode } = result;
 
   if (!canFunboxGetPb(result)) return false;
-  if ("stopOnLetter" in result && result.stopOnLetter === true) return false;
+  if (
+    "stopOnLetter" in result &&
+    result.stopOnLetter === true &&
+    result.acc < 100
+  )
+    return false;
 
   if (mode === "quote") {
     return false;
@@ -500,7 +506,12 @@ export async function checkIfTagPb(
 
   const { mode, tags: resultTags } = result;
   if (!canFunboxGetPb(result)) return [];
-  if ("stopOnLetter" in result && result.stopOnLetter === true) return [];
+  if (
+    "stopOnLetter" in result &&
+    result.stopOnLetter === true &&
+    result.acc < 100
+  )
+    return [];
 
   if (mode === "quote") {
     return [];
@@ -593,10 +604,10 @@ export async function linkDiscord(
   discordId: string,
   discordAvatar?: string
 ): Promise<void> {
-  const updates: Partial<DBUser> = _.pickBy(
-    { discordId, discordAvatar },
-    _.identity
-  );
+  const updates: Partial<DBUser> = { discordId };
+  if (discordAvatar !== undefined && discordAvatar !== null)
+    updates.discordAvatar = discordAvatar;
+
   await updateUser({ uid }, { $set: updates }, { stack: "link discord" });
 }
 
@@ -897,10 +908,15 @@ export async function updateProfile(
   profileDetailUpdates: Partial<UserProfileDetails>,
   inventory?: UserInventory
 ): Promise<void> {
-  const profileUpdates = _.omitBy(
-    flattenObjectDeep(profileDetailUpdates, "profileDetails"),
-    (value) =>
-      value === undefined || (_.isPlainObject(value) && _.isEmpty(value))
+  let profileUpdates = flattenObjectDeep(
+    Object.fromEntries(
+      Object.entries(profileDetailUpdates).filter(
+        ([_, value]) =>
+          value !== undefined &&
+          !(isPlainObject(value) && Object.keys(value).length === 0)
+      )
+    ),
+    "profileDetails"
   );
 
   const updates = {
@@ -1146,6 +1162,17 @@ export async function setBanned(uid: string, banned: boolean): Promise<void> {
   }
 }
 
+export async function clearStreakHourOffset(uid: string): Promise<void> {
+  await getUsersCollection().updateOne(
+    { uid },
+    {
+      $unset: {
+        "streak.hourOffset": "",
+      },
+    }
+  );
+}
+
 export async function checkIfUserIsPremium(
   uid: string,
   userInfoOverride?: Pick<DBUser, "premium">
@@ -1204,4 +1231,121 @@ async function updateUser(
       error.message ?? "User not found",
       error.stack
     );
+}
+
+export async function getFriends(uid: string): Promise<DBFriend[]> {
+  return await aggregateWithAcceptedConnections(
+    {
+      uid,
+      collectionName: "users",
+      includeMetaData: true,
+    },
+    [
+      {
+        $project: {
+          _id: false,
+          uid: true,
+          connectionId: "$connectionMeta._id",
+          lastModified: "$connectionMeta.lastModified",
+          name: true,
+          discordId: true,
+          discordAvatar: true,
+          startedTests: true,
+          completedTests: true,
+          timeTyping: true,
+          xp: true,
+          "streak.length": true,
+          "streak.maxLength": true,
+          personalBests: true,
+          "inventory.badges": true,
+          "premium.expirationTimestamp": true,
+          banned: 1,
+          lbOptOut: 1,
+        },
+      },
+      {
+        $addFields: {
+          top15: {
+            $reduce: {
+              //find highest wpm from time 15 PBs
+              input: "$personalBests.time.15",
+              initialValue: {},
+              in: {
+                $cond: [
+                  { $gte: ["$$this.wpm", "$$value.wpm"] },
+                  "$$this",
+                  "$$value",
+                ],
+              },
+            },
+          },
+          top60: {
+            $reduce: {
+              //find highest wpm from time 60 PBs
+              input: "$personalBests.time.60",
+              initialValue: {},
+              in: {
+                $cond: [
+                  { $gte: ["$$this.wpm", "$$value.wpm"] },
+                  "$$this",
+                  "$$value",
+                ],
+              },
+            },
+          },
+          badgeId: {
+            $ifNull: [
+              {
+                $first: {
+                  $map: {
+                    input: {
+                      $filter: {
+                        input: "$inventory.badges",
+                        as: "badge",
+                        cond: { $eq: ["$$badge.selected", true] },
+                      },
+                    },
+                    as: "selectedBadge",
+                    in: "$$selectedBadge.id",
+                  },
+                },
+              },
+              "$$REMOVE",
+            ],
+          },
+          isPremium: {
+            $cond: {
+              if: {
+                $or: [
+                  { $eq: ["$premium.expirationTimestamp", -1] },
+                  {
+                    $gt: ["$premium.expirationTimestamp", { $toLong: "$$NOW" }],
+                  },
+                ],
+              },
+              // oxlint-disable-next-line no-thenable
+              then: true,
+              else: "$$REMOVE",
+            },
+          },
+        },
+      },
+      {
+        $addFields: {
+          //remove nulls
+          top15: { $ifNull: ["$top15", "$$REMOVE"] },
+          top60: { $ifNull: ["$top60", "$$REMOVE"] },
+          badgeId: { $ifNull: ["$badgeId", "$$REMOVE"] },
+          lastModified: "$lastModified",
+        },
+      },
+      {
+        $project: {
+          personalBests: false,
+          inventory: false,
+          premium: false,
+        },
+      },
+    ]
+  );
 }

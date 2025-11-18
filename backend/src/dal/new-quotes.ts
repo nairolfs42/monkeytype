@@ -1,4 +1,4 @@
-import { SimpleGit, simpleGit } from "simple-git";
+import { simpleGit } from "simple-git";
 import { Collection, ObjectId } from "mongodb";
 import path from "path";
 import { existsSync, writeFileSync } from "fs";
@@ -6,10 +6,12 @@ import { readFile } from "node:fs/promises";
 import * as db from "../init/db";
 import MonkeyError from "../utils/error";
 import { compareTwoStrings } from "string-similarity";
-import { ApproveQuote, Quote } from "@monkeytype/contracts/schemas/quotes";
+import { ApproveQuote, Quote } from "@monkeytype/schemas/quotes";
 import { WithObjectId } from "../utils/misc";
 import { parseWithSchema as parseJsonWithSchema } from "@monkeytype/util/json";
 import { z } from "zod";
+import { tryCatchSync } from "@monkeytype/util/trycatch";
+import { Language } from "@monkeytype/schemas/languages";
 
 const JsonQuoteSchema = z.object({
   text: z.string(),
@@ -28,12 +30,12 @@ const QuoteDataSchema = z.object({
 
 const PATH_TO_REPO = "../../../../monkeytype-new-quotes";
 
-let git: SimpleGit | undefined;
-try {
-  git = simpleGit(path.join(__dirname, PATH_TO_REPO));
-} catch (e) {
-  console.error(`Failed to initialize git: ${e}`);
-  git = undefined;
+const { data: git, error } = tryCatchSync(() =>
+  simpleGit(path.join(__dirname, PATH_TO_REPO))
+);
+
+if (error) {
+  console.error(`Failed to initialize git: ${error}`);
 }
 
 type AddQuoteReturn = {
@@ -111,11 +113,11 @@ export async function add(
   return undefined;
 }
 
-export async function get(language: string): Promise<DBNewQuote[]> {
+export async function get(language: Language | "all"): Promise<DBNewQuote[]> {
   if (git === undefined) throw new MonkeyError(500, "Git not available.");
   const where: {
     approved: boolean;
-    language?: string;
+    language?: Language;
   } = {
     approved: false,
   };
@@ -145,7 +147,7 @@ export async function approve(
   editSource: string | undefined,
   name: string
 ): Promise<ApproveReturn> {
-  if (git === undefined) throw new MonkeyError(500, "Git not available.");
+  if (git === null) throw new MonkeyError(500, "Git not available.");
   //check mod status
   const targetQuote = await getNewQuoteCollection().findOne({
     _id: new ObjectId(quoteId),
@@ -185,6 +187,7 @@ export async function approve(
       if (compareTwoStrings(old.text, quote.text) > 0.8) {
         throw new MonkeyError(409, "Duplicate quote");
       }
+      return true;
     });
     let maxid = 0;
     quoteObject.quotes.map(function (q) {

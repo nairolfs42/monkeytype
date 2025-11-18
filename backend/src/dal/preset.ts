@@ -1,12 +1,8 @@
 import MonkeyError from "../utils/error";
 import * as db from "../init/db";
 import { ObjectId, type Filter, Collection, type WithId } from "mongodb";
-import {
-  EditPresetRequest,
-  Preset,
-} from "@monkeytype/contracts/schemas/presets";
-import { omit } from "lodash";
-import { WithObjectId } from "../utils/misc";
+import { EditPresetRequest, Preset } from "@monkeytype/schemas/presets";
+import { WithObjectId, omit } from "../utils/misc";
 
 const MAX_PRESETS = 10;
 
@@ -65,7 +61,7 @@ export async function editPreset(
   uid: string,
   preset: EditPresetRequest
 ): Promise<void> {
-  const update: Partial<Omit<Preset, "_id">> = omit(preset, "_id");
+  const update: Partial<Omit<Preset, "_id">> = omit(preset, ["_id"]);
   if (
     preset.config === undefined ||
     preset.config === null ||

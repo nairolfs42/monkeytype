@@ -1,4 +1,5 @@
-import { FunboxMetadata, FunboxName } from "./types";
+import { FunboxName } from "@monkeytype/schemas/configs";
+import { FunboxMetadata } from "./types";
 
 const list: Record<FunboxName, FunboxMetadata> = {
   "58008": {
@@ -132,7 +133,7 @@ const list: Record<FunboxName, FunboxMetadata> = {
   layout_mirror: {
     description: "Mirror the keyboard layout",
     canGetPb: true,
-    difficultyLevel: 1,
+    difficultyLevel: 3,
     properties: ["changesLayout"],
     frontendFunctions: ["applyConfig", "rememberSettings"],
     name: "layout_mirror",
@@ -403,9 +404,9 @@ const list: Record<FunboxName, FunboxMetadata> = {
     name: "backwards",
     properties: [
       "hasCssFile",
-      "noLigatures",
       "conflictsWithSymmetricChars",
       "wordOrder:reverse",
+      "reverseDirection",
     ],
     canGetPb: true,
     frontendFunctions: ["alterText"],
@@ -423,7 +424,7 @@ const list: Record<FunboxName, FunboxMetadata> = {
   instant_messaging: {
     description: "Who needs shift anyway?",
     canGetPb: false,
-    difficultyLevel: 1,
+    difficultyLevel: 0,
     properties: ["changesCapitalisation"],
     frontendFunctions: ["alterText"],
     name: "instant_messaging",
@@ -431,7 +432,7 @@ const list: Record<FunboxName, FunboxMetadata> = {
   underscore_spaces: {
     description: "Underscores_are_better.",
     canGetPb: false,
-    difficultyLevel: 0,
+    difficultyLevel: 1,
     properties: ["ignoresLanguage", "ignoresLayout", "nospace"],
     frontendFunctions: ["alterText"],
     name: "underscore_spaces",
@@ -460,6 +461,12 @@ const list: Record<FunboxName, FunboxMetadata> = {
     name: "asl",
     cssModifications: ["words"],
   },
+  no_quit: {
+    description: "You can't restart the test.",
+    canGetPb: true,
+    difficultyLevel: 0,
+    name: "no_quit",
+  },
 };
 
 export function getFunbox(name: FunboxName): FunboxMetadata;
@@ -467,12 +474,15 @@ export function getFunbox(names: FunboxName[]): FunboxMetadata[];
 export function getFunbox(
   nameOrNames: FunboxName | FunboxName[]
 ): FunboxMetadata | FunboxMetadata[] {
+  if (nameOrNames === undefined) return [];
   if (Array.isArray(nameOrNames)) {
     const out = nameOrNames.map((name) => getObject()[name]);
 
     //@ts-expect-error sanity check
     if (out.includes(undefined)) {
-      throw new Error("One of the funboxes is invalid: " + nameOrNames);
+      throw new Error(
+        "One of the funboxes is invalid: " + nameOrNames.toString()
+      );
     }
 
     return out;
@@ -499,6 +509,6 @@ export function getList(): FunboxMetadata[] {
   return out;
 }
 
-function getFunboxNames(): FunboxName[] {
+export function getFunboxNames(): FunboxName[] {
   return Object.keys(list) as FunboxName[];
 }

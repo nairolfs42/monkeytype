@@ -1,10 +1,7 @@
 import { generateOpenApi } from "@ts-rest/open-api";
 import { contract } from "@monkeytype/contracts/index";
 import { writeFileSync, mkdirSync } from "fs";
-import {
-  EndpointMetadata,
-  PermissionId,
-} from "@monkeytype/contracts/schemas/api";
+import { EndpointMetadata, PermissionId } from "@monkeytype/contracts/util/api";
 import type { OpenAPIObject, OperationObject } from "openapi3-ts";
 import {
   RateLimitIds,
@@ -101,6 +98,12 @@ export function getOpenApi(): OpenAPIObject {
           name: "leaderboards",
           description: "All-time and daily leaderboards of the fastest typers.",
           "x-displayName": "Leaderboards",
+        },
+        {
+          name: "connections",
+          description: "Connections between users.",
+          "x-displayName": "Connections",
+          "x-public": "no",
         },
         {
           name: "psas",
@@ -277,7 +280,7 @@ function addRequiredConfiguration(
   if (metadata === undefined || metadata.requireConfiguration === undefined)
     return;
 
-  //@ts-expect-error
+  //@ts-expect-error somehow path doesnt exist
   operation.description += `**Required configuration:** This operation can only be called if the [configuration](#tag/configuration/operation/configuration.get) for  \`${metadata.requireConfiguration.path}\` is \`true\`.\n\n`;
 }
 

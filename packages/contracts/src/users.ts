@@ -7,7 +7,7 @@ import {
   MonkeyResponseSchema,
   responseWithData,
   responseWithNullableData,
-} from "./schemas/api";
+} from "./util/api";
 import {
   CountByYearAndDaySchema,
   CustomThemeNameSchema,
@@ -24,13 +24,18 @@ import {
   UserSchema,
   UserStreakSchema,
   UserTagSchema,
-} from "./schemas/users";
-import { Mode2Schema, ModeSchema, PersonalBestSchema } from "./schemas/shared";
-import { IdSchema, LanguageSchema, StringNumberSchema } from "./schemas/util";
-import { CustomThemeColorsSchema } from "./schemas/configs";
-import { doesNotContainProfanity } from "./validation/validation";
-
-export const UserEmailSchema = z.string().email();
+  UserEmailSchema,
+  UserNameSchema,
+  FriendSchema,
+} from "@monkeytype/schemas/users";
+import {
+  Mode2Schema,
+  ModeSchema,
+  PersonalBestSchema,
+} from "@monkeytype/schemas/shared";
+import { IdSchema, StringNumberSchema } from "@monkeytype/schemas/util";
+import { LanguageSchema } from "@monkeytype/schemas/languages";
+import { CustomThemeColorsSchema } from "@monkeytype/schemas/configs";
 
 export const GetUserResponseSchema = responseWithData(
   UserSchema.extend({
@@ -38,18 +43,6 @@ export const GetUserResponseSchema = responseWithData(
   })
 );
 export type GetUserResponse = z.infer<typeof GetUserResponseSchema>;
-
-export const UserNameSchema = doesNotContainProfanity(
-  "substring",
-  z
-    .string()
-    .min(1)
-    .max(16)
-    .regex(
-      /^[\da-zA-Z_-]+$/,
-      "Can only contain lower/uppercase letters, underscore and minus."
-    )
-);
 
 export const CreateUserRequestSchema = z.object({
   email: UserEmailSchema.optional(),
@@ -65,6 +58,13 @@ export const CheckNamePathParametersSchema = z.object({
 export type CheckNamePathParameters = z.infer<
   typeof CheckNamePathParametersSchema
 >;
+
+export const CheckNameResponseSchema = responseWithData(
+  z.object({
+    available: z.boolean(),
+  })
+);
+export type CheckNameResponse = z.infer<typeof CheckNameResponseSchema>;
 
 export const UpdateUserNameRequestSchema = z.object({
   name: UserNameSchema,
@@ -328,6 +328,9 @@ export const GetStreakResponseSchema =
   responseWithNullableData(UserStreakSchema);
 export type GetStreakResponse = z.infer<typeof GetStreakResponseSchema>;
 
+export const GetFriendsResponseSchema = responseWithData(z.array(FriendSchema));
+export type GetFriendsResponse = z.infer<typeof GetFriendsResponseSchema>;
+
 const c = initContract();
 
 export const usersContract = c.router(
@@ -368,8 +371,7 @@ export const usersContract = c.router(
       path: "/checkName/:name",
       pathParams: CheckNamePathParametersSchema.strict(),
       responses: {
-        200: MonkeyResponseSchema.describe("Name is available"),
-        409: MonkeyResponseSchema.describe("Name is not available"),
+        200: CheckNameResponseSchema,
       },
       metadata: meta({
         authenticationOptions: { isPublic: true },
@@ -447,7 +449,7 @@ export const usersContract = c.router(
     },
     updatePassword: {
       summary: "update password",
-      description: "Updates a user's email",
+      description: "Updates a user's password",
       method: "PATCH",
       path: "/password",
       body: UpdatePasswordRequestSchema.strict(),
@@ -932,6 +934,22 @@ export const usersContract = c.router(
       metadata: meta({
         authenticationOptions: { acceptApeKeys: true },
         rateLimit: "userStreak",
+      }),
+    },
+    getFriends: {
+      summary: "get friends",
+      description: "get friends list",
+      method: "GET",
+      path: "/friends",
+      responses: {
+        200: GetFriendsResponseSchema,
+      },
+      metadata: meta({
+        rateLimit: "userFriendGet",
+        requireConfiguration: {
+          path: "connections.enabled",
+          invalidMessage: "Connections are not available at this time.",
+        },
       }),
     },
   },

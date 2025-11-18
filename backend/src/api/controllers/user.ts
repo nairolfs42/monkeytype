@@ -1,4 +1,3 @@
-import _ from "lodash";
 import * as UserDAL from "../../dal/user";
 import MonkeyError, {
   getErrorMessage,
@@ -8,7 +7,8 @@ import { MonkeyResponse } from "../../utils/monkey-response";
 import * as DiscordUtils from "../../utils/discord";
 import {
   buildAgentLog,
-  isDevEnvironment,
+  getFrontendUrl,
+  omit,
   replaceObjectId,
   replaceObjectIds,
   sanitizeString,
@@ -39,7 +39,7 @@ import {
   CountByYearAndDay,
   TestActivity,
   UserProfileDetails,
-} from "@monkeytype/contracts/schemas/users";
+} from "@monkeytype/schemas/users";
 import { addImportantLog, addLog, deleteUserLogs } from "../../dal/logs";
 import { sendForgotPasswordEmail as authSendForgotPasswordEmail } from "../../utils/auth";
 import {
@@ -51,6 +51,7 @@ import {
   AddTagRequest,
   AddTagResponse,
   CheckNamePathParameters,
+  CheckNameResponse,
   CreateUserRequest,
   DeleteCustomThemeRequest,
   EditCustomThemeRequst,
@@ -60,6 +61,7 @@ import {
   GetCustomThemesResponse,
   GetDiscordOauthLinkResponse,
   GetFavoriteQuotesResponse,
+  GetFriendsResponse,
   GetPersonalBestsQuery,
   GetPersonalBestsResponse,
   GetProfilePathParams,
@@ -88,13 +90,13 @@ import {
 } from "@monkeytype/contracts/users";
 import { MILLISECONDS_IN_DAY } from "@monkeytype/util/date-and-time";
 import { MonkeyRequest } from "../types";
+import { tryCatch } from "@monkeytype/util/trycatch";
+import * as ConnectionsDal from "../../dal/connections";
+import { PersonalBest } from "@monkeytype/schemas/shared";
 
 async function verifyCaptcha(captcha: string): Promise<void> {
-  let verified = false;
-  try {
-    verified = await verify(captcha);
-  } catch (e) {
-    //fetch to recaptcha api can sometimes fail
+  const { data: verified, error } = await tryCatch(verify(captcha));
+  if (error) {
     throw new MonkeyError(
       422,
       "Request to the Captcha API failed, please try again later"
@@ -177,18 +179,15 @@ export async function sendVerificationEmail(
     );
   }
 
-  let link = "";
-  try {
-    link = await FirebaseAdmin()
+  const { data: link, error } = await tryCatch(
+    FirebaseAdmin()
       .auth()
-      .generateEmailVerificationLink(email, {
-        url: isDevEnvironment()
-          ? "http://localhost:3000"
-          : "https://monkeytype.com",
-      });
-  } catch (e) {
-    if (isFirebaseError(e)) {
-      if (e.errorInfo.code === "auth/user-not-found") {
+      .generateEmailVerificationLink(email, { url: getFrontendUrl() })
+  );
+
+  if (error) {
+    if (isFirebaseError(error)) {
+      if (error.errorInfo.code === "auth/user-not-found") {
         throw new MonkeyError(
           500,
           "Auth user not found when the user was found in the database. Contact support with this error message and your email",
@@ -198,11 +197,11 @@ export async function sendVerificationEmail(
           }),
           userInfo.uid
         );
-      } else if (e.errorInfo.code === "auth/too-many-requests") {
+      } else if (error.errorInfo.code === "auth/too-many-requests") {
         throw new MonkeyError(429, "Too many requests. Please try again later");
       } else if (
-        e.errorInfo.code === "auth/internal-error" &&
-        e.errorInfo.message.toLowerCase().includes("too_many_attempts")
+        error.errorInfo.code === "auth/internal-error" &&
+        error.errorInfo.message.toLowerCase().includes("too_many_attempts")
       ) {
         throw new MonkeyError(
           429,
@@ -212,12 +211,12 @@ export async function sendVerificationEmail(
         throw new MonkeyError(
           500,
           "Firebase failed to generate an email verification link: " +
-            e.errorInfo.message,
-          JSON.stringify(e)
+            error.errorInfo.message,
+          JSON.stringify(error)
         );
       }
     } else {
-      const message = getErrorMessage(e);
+      const message = getErrorMessage(error);
       if (message === undefined) {
         throw new MonkeyError(
           500,
@@ -233,12 +232,13 @@ export async function sendVerificationEmail(
           throw new MonkeyError(
             500,
             "Failed to generate an email verification link: " + message,
-            (e as Error).stack
+            error.stack
           );
         }
       }
     }
   }
+
   await emailQueue.sendVerificationEmail(email, userInfo.name, link);
 
   return new MonkeyResponse("Email sent", null);
@@ -259,22 +259,20 @@ export async function sendForgotPasswordEmail(
 export async function deleteUser(req: MonkeyRequest): Promise<MonkeyResponse> {
   const { uid } = req.ctx.decodedToken;
 
-  let userInfo:
-    | Pick<UserDAL.DBUser, "banned" | "name" | "email" | "discordId">
-    | undefined;
-
-  try {
-    userInfo = await UserDAL.getPartialUser(uid, "delete user", [
+  const { data: userInfo, error } = await tryCatch(
+    UserDAL.getPartialUser(uid, "delete user", [
       "banned",
       "name",
       "email",
       "discordId",
-    ]);
-  } catch (e) {
-    if (e instanceof MonkeyError && e.status === 404) {
+    ])
+  );
+
+  if (error) {
+    if (error instanceof MonkeyError && error.status === 404) {
       //userinfo was already deleted. We ignore this and still try to remove the  other data
     } else {
-      throw e;
+      throw error;
     }
   }
 
@@ -298,6 +296,7 @@ export async function deleteUser(req: MonkeyRequest): Promise<MonkeyResponse> {
       uid,
       req.ctx.configuration.leaderboards.weeklyXp
     ),
+    ConnectionsDal.deleteByUid(uid),
   ]);
 
   try {
@@ -388,6 +387,8 @@ export async function updateName(
   }
 
   await UserDAL.updateName(uid, name, user.name);
+
+  await ConnectionsDal.updateName(uid, name);
   void addImportantLog(
     "user_name_updated",
     `changed name from ${user.name} to ${name}`,
@@ -431,16 +432,15 @@ export async function optOutOfLeaderboards(
 
 export async function checkName(
   req: MonkeyRequest<undefined, undefined, CheckNamePathParameters>
-): Promise<MonkeyResponse> {
+): Promise<CheckNameResponse> {
   const { name } = req.params;
   const { uid } = req.ctx.decodedToken;
 
   const available = await UserDAL.isNameAvailable(name, uid);
-  if (!available) {
-    throw new MonkeyError(409, "Username unavailable");
-  }
 
-  return new MonkeyResponse("Username available", null);
+  return new MonkeyResponse("Check username", {
+    available,
+  });
 }
 
 export async function updateEmail(
@@ -513,10 +513,11 @@ type RelevantUserInfo = Omit<
   | "note"
   | "ips"
   | "testActivity"
+  | "suspicious"
 >;
 
 function getRelevantUserInfo(user: UserDAL.DBUser): RelevantUserInfo {
-  return _.omit(user, [
+  return omit(user, [
     "bananas",
     "lbPersonalBests",
     "inbox",
@@ -527,18 +528,19 @@ function getRelevantUserInfo(user: UserDAL.DBUser): RelevantUserInfo {
     "note",
     "ips",
     "testActivity",
+    "suspicious",
   ]) as RelevantUserInfo;
 }
 
 export async function getUser(req: MonkeyRequest): Promise<GetUserResponse> {
   const { uid } = req.ctx.decodedToken;
 
-  let userInfo: UserDAL.DBUser;
-  try {
-    userInfo = await UserDAL.getUser(uid, "get user");
-  } catch (e) {
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-    if (e.status === 404) {
+  const { data: userInfo, error } = await tryCatch(
+    UserDAL.getUser(uid, "get user")
+  );
+
+  if (error) {
+    if (error instanceof MonkeyError && error.status === 404) {
       //if the user is in the auth system but not in the db, its possible that the user was created by bypassing captcha
       //since there is no data in the database anyway, we can just delete the user from the auth system
       //and ask them to sign up again
@@ -564,7 +566,7 @@ export async function getUser(req: MonkeyRequest): Promise<GetUserResponse> {
         }
       }
     } else {
-      throw e;
+      throw error;
     }
   }
 
@@ -582,7 +584,7 @@ export async function getUser(req: MonkeyRequest): Promise<GetUserResponse> {
 
   let inboxUnreadSize = 0;
   if (req.ctx.configuration.users.inbox.enabled) {
-    inboxUnreadSize = _.filter(userInfo.inbox, { read: false }).length;
+    inboxUnreadSize = userInfo.inbox?.filter((mail) => !mail.read).length ?? 0;
   }
 
   if (!userInfo.name) {
@@ -933,8 +935,30 @@ export async function getProfile(
     lbOptOut,
   } = user;
 
-  const validTimePbs = _.pick(personalBests?.time, "15", "30", "60", "120");
-  const validWordsPbs = _.pick(personalBests?.words, "10", "25", "50", "100");
+  const extractValid = (
+    src: Record<string, PersonalBest[]>,
+    validKeys: string[]
+  ): Record<string, PersonalBest[]> => {
+    return validKeys.reduce((obj, key) => {
+      if (src?.[key] !== undefined) {
+        obj[key] = src[key];
+      }
+      return obj;
+    }, {});
+  };
+
+  const validTimePbs = extractValid(personalBests.time, [
+    "15",
+    "30",
+    "60",
+    "120",
+  ]);
+  const validWordsPbs = extractValid(personalBests.words, [
+    "10",
+    "25",
+    "50",
+    "100",
+  ]);
 
   const typingStats = {
     completedTests,
@@ -976,6 +1000,11 @@ export async function getProfile(
     uid: user.uid,
   } as UserProfile;
 
+  if (user.profileDetails?.showActivityOnPublicProfile) {
+    profileData.testActivity = generateCurrentTestActivity(user.testActivity);
+  } else {
+    delete profileData.testActivity;
+  }
   return new MonkeyResponse("Profile retrieved", profileData);
 }
 
@@ -983,7 +1012,13 @@ export async function updateProfile(
   req: MonkeyRequest<undefined, UpdateUserProfileRequest>
 ): Promise<UpdateUserProfileResponse> {
   const { uid } = req.ctx.decodedToken;
-  const { bio, keyboard, socialProfiles, selectedBadgeId } = req.body;
+  const {
+    bio,
+    keyboard,
+    socialProfiles,
+    selectedBadgeId,
+    showActivityOnPublicProfile,
+  } = req.body;
 
   const user = await UserDAL.getPartialUser(uid, "update user profile", [
     "banned",
@@ -1005,10 +1040,13 @@ export async function updateProfile(
   const profileDetailsUpdates: Partial<UserProfileDetails> = {
     bio: sanitizeString(bio),
     keyboard: sanitizeString(keyboard),
-    socialProfiles: _.mapValues(
-      socialProfiles,
-      sanitizeString
-    ) as UserProfileDetails["socialProfiles"],
+    socialProfiles: Object.fromEntries(
+      Object.entries(socialProfiles ?? {}).map(([key, value]) => [
+        key,
+        sanitizeString(value),
+      ])
+    ),
+    showActivityOnPublicProfile,
   };
 
   await UserDAL.updateProfile(uid, profileDetailsUpdates, user.inventory);
@@ -1252,4 +1290,20 @@ export async function getStreak(
   const user = await UserDAL.getPartialUser(uid, "streak", ["streak"]);
 
   return new MonkeyResponse("Streak data retrieved", user.streak ?? null);
+}
+
+export async function getFriends(
+  req: MonkeyRequest
+): Promise<GetFriendsResponse> {
+  const { uid } = req.ctx.decodedToken;
+  const premiumEnabled = req.ctx.configuration.users.premium.enabled;
+  const data = await UserDAL.getFriends(uid);
+
+  if (!premiumEnabled) {
+    for (const friend of data) {
+      delete friend.isPremium;
+    }
+  }
+
+  return new MonkeyResponse("Friends retrieved", data);
 }
